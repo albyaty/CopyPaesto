@@ -31,8 +31,8 @@ An attacker who guesses an active 5-digit code can create a visible approval req
 - Direct WebRTC is attempted first.
 - If it cannot connect, the transfer restarts over the authenticated room WebSocket.
 - Fallback file names and control messages are always AES-GCM encrypted end to end.
-- **Private fallback** encrypts every 512 KiB binary chunk with AES-GCM before the Worker sees it.
-- **Turbo fallback** is an explicit speed-first option. Bulk chunks are protected in transit by WSS/TLS, but are not encrypted end to end by CopyPaesto. Cloudflare—and a work network that performs trusted TLS inspection—can inspect or alter those file bytes. The five-digit code, room PIN, and approval gate access; they do not make Turbo bytes confidential from infrastructure carrying the connection.
+- The current interface automatically uses **Turbo fallback** when direct WebRTC is blocked. Bulk chunks are protected in transit by WSS/TLS, but are not encrypted end to end by CopyPaesto. Cloudflare—and a work network that performs trusted TLS inspection—can inspect or alter those file bytes. The five-digit code, room PIN, and approval gate access; they do not make Turbo bytes confidential from infrastructure carrying the connection.
+- The earlier AES-GCM chunk format remains accepted for rolling compatibility with open tabs from older releases, but it is no longer exposed as a transfer choice.
 - The Worker forwards file frames without storing chunks or converting them to Base64.
 - Sender acknowledgements cap outstanding fallback data at about 32 MiB.
 - Optional TURN credentials are available only through a room-authenticated endpoint; the long-lived TURN key remains a Worker secret.
@@ -49,7 +49,7 @@ Direct WebRTC remains DTLS-protected regardless of which fallback mode is select
 
 ## What Cloudflare can observe
 
-This is not an anonymity system. Cloudflare may observe client IP metadata, connection times, encrypted message sizes, transfer volume, and which authenticated sockets exchange envelopes. The Worker receives device display names for presence and pairing approval. It does not receive plaintext clipboard content, plaintext file names, transfer controls, or room encryption keys. It can receive plaintext bulk file bytes and transfer identifiers only when the sender explicitly selects Turbo fallback.
+This is not an anonymity system. Cloudflare may observe client IP metadata, connection times, encrypted message sizes, transfer volume, and which authenticated sockets exchange envelopes. The Worker receives device display names for presence and pairing approval. It does not receive plaintext clipboard content, plaintext file names, transfer controls, or room encryption keys. When direct WebRTC is blocked and a file uses Turbo fallback, it can receive plaintext bulk file bytes and transfer identifiers.
 
 ## Current limitations
 
