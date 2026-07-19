@@ -26,6 +26,15 @@ An attacker who guesses an active 5-digit code can create a visible approval req
 - Direct WebRTC file data is protected by DTLS.
 - The relay does not enumerate private rooms and deletes room state after 24 hours.
 
+## Remembered browser sessions
+
+- After a device is approved, CopyPaesto stores its hidden room code, room PIN, and device label in that browser profile's local site storage.
+- Closing a tab or restarting Chrome, the computer, or the phone does not require another pairing. Visiting CopyPaesto from the same browser profile reconnects automatically.
+- **Leave** asks for confirmation and then deletes the remembered room from that browser. Clearing site data also forgets it; private/incognito storage normally disappears with the private browsing session.
+- The saved credentials are not placed in GitHub or copied into Cloudflare storage by this feature. They remain accessible to JavaScript running on the CopyPaesto origin.
+- This is a trusted-device convenience, not hardware-backed credential storage. Someone who can use the unlocked browser profile, inspect its site storage, or execute script on the app origin could recover the room credentials. Use **Leave** on shared or untrusted devices.
+- When Cloudflare's 24-hour room state has expired, a remembered device can recreate the same empty authenticated room. Expired clipboard state is not restored.
+
 ## File transfer protection
 
 - Direct WebRTC is attempted first.
@@ -59,6 +68,7 @@ This is not an anonymity system. Cloudflare may observe client IP metadata, conn
 - Transfers do not yet resume across a browser refresh, computer sleep, or lost network. They restart from the beginning.
 - Incoming files over 128 MB require a browser with the streaming file-save API, currently Chrome or Edge.
 - Trusted auto-save relies on the same Chromium file-system API and cannot bypass a browser permission prompt when permission has expired.
+- Remembered sessions rely on browser local site storage and disappear if the user or browser clears that storage.
 - Browser clipboard APIs require user interaction or permission. Automatic system-wide monitoring requires an extension or native companion.
 - A larger public deployment should add stronger abuse monitoring, security headers, and operational alerting.
 

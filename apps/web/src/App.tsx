@@ -21,7 +21,9 @@ import {
 import {
   generatePin,
   generateSessionCode,
+  isValidPin,
   isValidPairingCode,
+  isValidSessionCode,
   normalizePairingCode,
 } from "./lib/session";
 import type { ConnectionStatus, Peer, TransferItem } from "./types";
@@ -30,6 +32,67 @@ interface SessionState {
   code: string;
   pin: string;
   createdHere: boolean;
+}
+
+interface RememberedSessionRecord {
+  version: 1;
+  session: SessionState;
+  deviceName: string;
+  rememberedAt: number;
+}
+
+const REMEMBERED_SESSION_KEY = "copypaesto:remembered-session:v1";
+
+function isSessionState(value: unknown): value is SessionState {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<SessionState>;
+  return (
+    typeof candidate.code === "string" &&
+    isValidSessionCode(candidate.code) &&
+    typeof candidate.pin === "string" &&
+    isValidPin(candidate.pin) &&
+    typeof candidate.createdHere === "boolean"
+  );
+}
+
+function forgetRememberedSession() {
+  try {
+    localStorage.removeItem(REMEMBERED_SESSION_KEY);
+  } catch {
+    // Some privacy modes block persistent browser storage.
+  }
+}
+
+function readRememberedSession(): { session: SessionState; deviceName: string } | null {
+  try {
+    const raw = localStorage.getItem(REMEMBERED_SESSION_KEY);
+    if (!raw) return null;
+    const record = JSON.parse(raw) as Partial<RememberedSessionRecord>;
+    const deviceName = typeof record.deviceName === "string" ? record.deviceName.trim() : "";
+    if (record.version !== 1 || !isSessionState(record.session) || !deviceName || deviceName.length > 40) {
+      forgetRememberedSession();
+      return null;
+    }
+    return { session: record.session, deviceName };
+  } catch {
+    forgetRememberedSession();
+    return null;
+  }
+}
+
+function rememberSession(session: SessionState, deviceName: string) {
+  try {
+    const record: RememberedSessionRecord = {
+      version: 1,
+      session,
+      deviceName,
+      rememberedAt: Date.now(),
+    };
+    localStorage.setItem(REMEMBERED_SESSION_KEY, JSON.stringify(record));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function getClientId() {
@@ -42,7 +105,11 @@ function getClientId() {
 }
 
 function getDeviceName() {
-  return localStorage.getItem("copypaesto:device-name") || "My computer";
+  try {
+    return localStorage.getItem("copypaesto:device-name") || "My computer";
+  } catch {
+    return "My computer";
+  }
 }
 
 function copyText(value: string) {
@@ -101,7 +168,11 @@ function Onboarding({ onEnter }: { onEnter: (session: SessionState, deviceName: 
 
   const persistDeviceName = () => {
     const clean = deviceName.trim() || "My computer";
-    localStorage.setItem("copypaesto:device-name", clean);
+    try {
+      localStorage.setItem("copypaesto:device-name", clean);
+    } catch {
+      // Pairing still works when persistent site storage is unavailable.
+    }
     return clean;
   };
 
@@ -473,14 +544,18 @@ function ConnectionBadge({ status, peerCount }: { status: ConnectionStatus; peer
 function SessionSheet({
   deviceName,
   peers,
+  remembered,
   canAddDevice,
   onAddDevice,
+  onForget,
   onClose,
 }: {
   deviceName: string;
   peers: Peer[];
+  remembered: boolean;
   canAddDevice: boolean;
   onAddDevice: () => void;
+  onForget: () => void;
   onClose: () => void;
 }) {
   const devices = [{ id: "this-device", name: deviceName, current: true }, ...peers.map((peer) => ({
@@ -510,8 +585,17 @@ function SessionSheet({
           <div><strong>Clipboard stays end-to-end encrypted</strong><span>Clipboard content and session controls are encrypted before they reach the relay.</span></div>
         </div>
         <div className="session-fact">
+          <span className="session-fact-number">{remembered ? "ON" : "!"}</span>
+          <div>
+            <strong>{remembered ? "Remembered on this browser" : "Browser memory is unavailable"}</strong>
+            <span>{remembered
+              ? "Close tabs or restart Chrome and this device reconnects automatically. Leave forgets the room here."
+              : "This browser blocked persistent site storage, so keep this tab open or pair again later."}</span>
+          </div>
+        </div>
+        <div className="session-fact">
           <span className="session-fact-number">24h</span>
-          <div><strong>Temporary by default</strong><span>The room and its encrypted state expire automatically.</span></div>
+          <div><strong>Relay state stays temporary</strong><span>Stored clipboard state expires after 24 hours. Browser memory can reconnect to an empty room; it does not preserve old content.</span></div>
         </div>
         <button
           className="add-device-sheet-button"
@@ -520,6 +604,7 @@ function SessionSheet({
         >
           {canAddDevice ? "+ Add another device" : "Room is full"}
         </button>
+        <button className="forget-session-button" onClick={onForget}>Leave &amp; forget this room</button>
         <div className="security-caption">Up to eight devices can join. Open a fresh five-digit invitation whenever you want to add one, and approve every requester separately.</div>
       </section>
     </div>
@@ -566,9 +651,10 @@ function TransferRow({
   );
 }
 
-function Workspace({ session, deviceName, onLeave }: {
+function Workspace({ session, deviceName, remembered, onLeave }: {
   session: SessionState;
   deviceName: string;
+  remembered: boolean;
   onLeave: () => void;
 }) {
   const clientId = useMemo(getClientId, []);
@@ -653,7 +739,7 @@ function Workspace({ session, deviceName, onLeave }: {
         <div><LockIcon /></div>
         <h1>This secure room could not be opened.</h1>
         <p>No clipboard text or device information was shared.</p>
-        <button className="primary-action" onClick={onLeave}>Try again <ArrowIcon /></button>
+        <button className="primary-action" onClick={onLeave}>Forget and pair again <ArrowIcon /></button>
       </main>
     );
   }
@@ -855,11 +941,13 @@ function Workspace({ session, deviceName, onLeave }: {
         <SessionSheet
           deviceName={deviceName}
           peers={room.peers}
+          remembered={remembered}
           canAddDevice={canAddDevice}
           onAddDevice={() => {
             setShowSession(false);
             setShowAddDevice(true);
           }}
+          onForget={onLeave}
           onClose={() => setShowSession(false)}
         />
       )}
@@ -876,19 +964,34 @@ function Workspace({ session, deviceName, onLeave }: {
 }
 
 export default function App() {
-  const [session, setSession] = useState<SessionState | null>(null);
-  const [deviceName, setDeviceName] = useState(getDeviceName);
+  const [restoredSession] = useState(readRememberedSession);
+  const [session, setSession] = useState<SessionState | null>(() => restoredSession?.session ?? null);
+  const [deviceName, setDeviceName] = useState(() => restoredSession?.deviceName ?? getDeviceName());
+  const [remembered, setRemembered] = useState(() => Boolean(restoredSession));
 
   const enter = (next: SessionState, name: string) => {
     setDeviceName(name);
+    setRemembered(rememberSession(next, name));
     setSession(next);
   };
 
   const leave = () => {
+    const confirmed = window.confirm(
+      "Leave and forget this room on this browser? You will need a new five-digit invitation to reconnect.",
+    );
+    if (!confirmed) return;
+    forgetRememberedSession();
+    setRemembered(false);
     setSession(null);
   };
 
   return session
-    ? <Workspace key={`${session.code}:${session.pin}`} session={session} deviceName={deviceName} onLeave={leave} />
+    ? <Workspace
+        key={`${session.code}:${session.pin}`}
+        session={session}
+        deviceName={deviceName}
+        remembered={remembered}
+        onLeave={leave}
+      />
     : <Onboarding onEnter={enter} />;
 }
