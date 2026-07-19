@@ -16,6 +16,7 @@ export function relayHttpOrigin() {
 interface RelayCallbacks {
   onOpen: () => void;
   onMessage: (message: ServerMessage) => void;
+  onBinary: (message: ArrayBuffer) => void;
   onClose: (event: CloseEvent) => void;
   onError: () => void;
 }
@@ -30,6 +31,7 @@ export class RoomRelay {
     const url = new URL(`${relayOrigin()}/rooms/${encodeURIComponent(roomId)}/connect`);
     url.searchParams.set("clientId", clientId);
     const socket = new WebSocket(url);
+    socket.binaryType = "arraybuffer";
     this.socket = socket;
 
     socket.addEventListener("open", () => {
@@ -38,11 +40,14 @@ export class RoomRelay {
     });
     socket.addEventListener("message", (event) => {
       if (this.socket !== socket) return;
-      if (typeof event.data !== "string") return;
-      try {
-        this.callbacks.onMessage(JSON.parse(event.data) as ServerMessage);
-      } catch {
-        // Ignore malformed relay messages.
+      if (typeof event.data === "string") {
+        try {
+          this.callbacks.onMessage(JSON.parse(event.data) as ServerMessage);
+        } catch {
+          // Ignore malformed relay messages.
+        }
+      } else if (event.data instanceof ArrayBuffer) {
+        this.callbacks.onBinary(event.data);
       }
     });
     socket.addEventListener("close", (event) => {
@@ -58,6 +63,12 @@ export class RoomRelay {
   send(message: unknown) {
     if (this.socket?.readyState !== WebSocket.OPEN) return false;
     this.socket.send(JSON.stringify(message));
+    return true;
+  }
+
+  sendBinary(message: ArrayBuffer) {
+    if (this.socket?.readyState !== WebSocket.OPEN) return false;
+    this.socket.send(message);
     return true;
   }
 

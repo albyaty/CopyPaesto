@@ -28,8 +28,8 @@ export type SignalPayload =
   | { kind: "ice"; transferId: string; candidate: RTCIceCandidateInit };
 
 export type RelayFilePayload =
-  | { kind: "offer"; transferId: string; name: string; size: number; mime: string; lastModified: number }
-  | { kind: "accept"; transferId: string }
+  | { kind: "offer"; transferId: string; name: string; size: number; mime: string; lastModified: number; binary?: true }
+  | { kind: "accept"; transferId: string; binary?: true }
   | { kind: "decline"; transferId: string }
   | { kind: "chunk"; transferId: string; offset: number; data: string }
   | { kind: "ack"; transferId: string; received: number }

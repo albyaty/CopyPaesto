@@ -71,6 +71,8 @@ interface PairingCodePointer {
 const ROOM_LIFETIME_MS = 24 * 60 * 60 * 1000;
 const PAIRING_LIFETIME_MS = 10 * 60 * 1000;
 const MAX_MESSAGE_BYTES = 320_000;
+const MAX_BINARY_MESSAGE_BYTES = 2_100_000;
+const MAX_CLIENT_ID_BYTES = 80;
 const MAX_PAIRING_BODY_BYTES = 16_000;
 const roomIdPattern = /^[A-Za-z0-9_-]{40,48}$/;
 const pairingIdPattern = /^[A-Za-z0-9_-]{32,64}$/;
@@ -616,6 +618,55 @@ export class ClipboardRoom extends DurableObject<Env> {
     await this.ctx.storage.setAlarm(Date.now() + ROOM_LIFETIME_MS);
   }
 
+  private forwardBinaryFileFrame(
+    socket: WebSocket,
+    message: ArrayBuffer,
+    sender: ClientAttachment,
+  ) {
+    if (message.byteLength > MAX_BINARY_MESSAGE_BYTES) {
+      socket.send(JSON.stringify({ type: "error", message: "File chunk is too large" }));
+      return;
+    }
+
+    const bytes = new Uint8Array(message);
+    const targetLength = bytes[1] ?? 0;
+    if (
+      bytes[0] !== 1 ||
+      !targetLength ||
+      targetLength > MAX_CLIENT_ID_BYTES ||
+      bytes.length <= 2 + targetLength + 12 + 16
+    ) {
+      socket.send(JSON.stringify({ type: "error", message: "Invalid file chunk" }));
+      return;
+    }
+
+    let targetId: string;
+    try {
+      targetId = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(
+        bytes.subarray(2, 2 + targetLength),
+      );
+    } catch {
+      socket.send(JSON.stringify({ type: "error", message: "Invalid file target" }));
+      return;
+    }
+
+    const source = new TextEncoder().encode(sender.clientId);
+    if (!source.length || source.length > MAX_CLIENT_ID_BYTES) return;
+    const encryptedPayload = bytes.subarray(2 + targetLength);
+    const forwarded = new Uint8Array(2 + source.length + encryptedPayload.length);
+    forwarded[0] = 1;
+    forwarded[1] = source.length;
+    forwarded.set(source, 2);
+    forwarded.set(encryptedPayload, 2 + source.length);
+
+    for (const peer of this.ctx.getWebSockets()) {
+      if (this.attachment(peer)?.clientId === targetId) {
+        peer.send(forwarded.buffer);
+        break;
+      }
+    }
+  }
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname.endsWith("/turn")) {
@@ -648,7 +699,19 @@ export class ClipboardRoom extends DurableObject<Env> {
   }
 
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer) {
-    if (typeof message !== "string" || message.length > MAX_MESSAGE_BYTES) {
+    const sender = this.attachment(socket);
+    if (!sender) return;
+
+    if (message instanceof ArrayBuffer) {
+      if (!sender.authenticated) {
+        socket.close(4003, "Authentication required");
+        return;
+      }
+      this.forwardBinaryFileFrame(socket, message, sender);
+      return;
+    }
+
+    if (message.length > MAX_MESSAGE_BYTES) {
       socket.send(JSON.stringify({ type: "error", message: "Message is too large" }));
       return;
     }
@@ -660,9 +723,6 @@ export class ClipboardRoom extends DurableObject<Env> {
       socket.send(JSON.stringify({ type: "error", message: "Invalid message" }));
       return;
     }
-
-    const sender = this.attachment(socket);
-    if (!sender) return;
 
     if (!sender.authenticated) {
       const verifier = typeof data.verifier === "string" ? data.verifier : "";

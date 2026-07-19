@@ -16,7 +16,7 @@ The interface is published on GitHub Pages. A Cloudflare Worker and two SQLite-b
 - Three text slots update as you type.
 - Clipboard payloads, signaling, and relayed file chunks are AES-GCM encrypted in the browser.
 - Files try a direct WebRTC data channel first, then automatically switch to the encrypted Worker relay when the networks cannot connect directly.
-- Transfers use 32 KiB chunks, acknowledgements, pause/resume, and about 4 MiB maximum unacknowledged data.
+- Direct transfers use 32 KiB data-channel chunks. The fallback uses encrypted 512 KiB binary WebSocket frames, pause/resume, and a bounded 32 MiB relay window.
 - Chrome and Edge stream incoming large files directly to a user-selected destination on disk.
 - Rooms delete their encrypted state after 24 hours.
 
@@ -36,14 +36,14 @@ The relay can observe connection metadata and encrypted traffic sizes, but not c
 
 ## Handling a 1 GB file
 
-CopyPaesto does not load a 1 GB file into memory. The sender reads 32 KiB at a time and stops when roughly 4 MiB is waiting for acknowledgement. The receiver writes acknowledged chunks to the selected destination as they arrive.
+CopyPaesto does not load a 1 GB file into memory. On the fallback route, the sender reads 512 KiB at a time and stops when roughly 32 MiB is waiting for acknowledgement. The receiver writes chunks to the selected destination as they arrive. Direct WebRTC transfers retain smaller 32 KiB data-channel chunks and a 4 MiB window.
 
 The route is selected automatically:
 
 1. WebRTC attempts a direct connection.
 2. If it has not connected within 12 seconds, CopyPaesto closes that attempt.
 3. The transfer is offered again over the authenticated Worker WebSocket.
-4. Every fallback control message and chunk is encrypted in the browser before the Worker forwards it.
+4. Every fallback control message and binary chunk is encrypted in the browser before the Worker forwards it; file bytes are never converted to Base64.
 
 Both computers must remain online until the transfer completes. Chrome or Edge is recommended for files over 128 MB because other browsers may not expose the streaming file-save API. Without that API, the memory-backed fallback is limited to 128 MB.
 
@@ -66,11 +66,12 @@ Useful commands:
 npm run check
 npm run build
 npm run test:relay
+npm run benchmark:relay
 npm run dev:web
 npm run dev:relay
 ```
 
-`npm run test:relay` covers short-code pairing, host authorization, ECDH credential handoff, room authentication, encrypted-state routing, signaling, and file-fallback routing.
+`npm run test:relay` covers short-code pairing, host authorization, ECDH credential handoff, room authentication, encrypted-state routing, signaling, and JSON/binary file-fallback routing. `npm run benchmark:relay` measures encrypted binary relay throughput with the production 512 KiB chunk size.
 
 ## Deploy the relay
 

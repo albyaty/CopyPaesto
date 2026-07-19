@@ -169,11 +169,14 @@ async function testPairing() {
 
 function connect(roomId, clientId) {
   const socket = new WebSocket(`${origin}/rooms/${roomId}/connect?clientId=${clientId}`);
+  socket.binaryType = "arraybuffer";
   const queued = [];
   const waiters = [];
 
   socket.addEventListener("message", (event) => {
-    const message = JSON.parse(event.data);
+    const message = typeof event.data === "string"
+      ? JSON.parse(event.data)
+      : { type: "binary", data: event.data };
     const index = waiters.findIndex((waiter) => waiter.predicate(message));
     if (index >= 0) {
       const [waiter] = waiters.splice(index, 1);
@@ -269,6 +272,25 @@ async function testRoom() {
   const chunkRelay = await second.next((message) => message.type === "file:relay" && message.envelope.data.length === 60_000);
   assert.deepEqual(chunkRelay.envelope, chunkEnvelope);
 
+  const target = encoder.encode("integration-b");
+  const opaqueEncryptedPayload = randomBytes(2 * 1024 * 1024);
+  const binaryFrame = new Uint8Array(2 + target.length + opaqueEncryptedPayload.length);
+  binaryFrame[0] = 1;
+  binaryFrame[1] = target.length;
+  binaryFrame.set(target, 2);
+  binaryFrame.set(opaqueEncryptedPayload, 2 + target.length);
+  first.socket.send(binaryFrame.buffer);
+
+  const binaryRelay = await second.next((message) => message.type === "binary");
+  assert.ok(binaryRelay.data instanceof ArrayBuffer);
+  const forwarded = new Uint8Array(binaryRelay.data);
+  const sourceLength = forwarded[1];
+  assert.equal(decoder.decode(forwarded.subarray(2, 2 + sourceLength)), "integration-a");
+  assert.deepEqual(
+    Buffer.from(forwarded.subarray(2 + sourceLength)),
+    Buffer.from(opaqueEncryptedPayload),
+  );
+
   first.socket.close(1000, "Test complete");
   second.socket.close(1000, "Test complete");
 }
@@ -276,4 +298,4 @@ async function testRoom() {
 await testPairing();
 await testRoom();
 
-console.log("Relay integration passed: 5-digit host-approved pairing, E2E handoff, PIN gate, encrypted state, signaling, and file fallback routing.");
+console.log("Relay integration passed: 5-digit host-approved pairing, E2E handoff, PIN gate, encrypted state, signaling, and JSON/binary file fallback routing.");

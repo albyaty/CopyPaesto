@@ -1,11 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { MAX_RELAY_CHUNK_BYTES } from "../lib/fileRelay";
 import { fetchIceServers, type TurnAccess } from "../lib/relay";
 import type { Peer, RelayFilePayload, SignalPayload, TransferItem } from "../types";
 
-const CHUNK_SIZE = 32 * 1024;
-const MAX_IN_FLIGHT = 4 * 1024 * 1024;
+const DIRECT_CHUNK_SIZE = 32 * 1024;
+const LEGACY_RELAY_CHUNK_SIZE = 32 * 1024;
+const BINARY_RELAY_CHUNK_SIZE = MAX_RELAY_CHUNK_BYTES;
+const DIRECT_MAX_IN_FLIGHT = 4 * 1024 * 1024;
+const BINARY_RELAY_MAX_IN_FLIGHT = 32 * 1024 * 1024;
 const MAX_CHANNEL_BUFFER = 1024 * 1024;
-const ACK_INTERVAL = 512 * 1024;
+const DIRECT_ACK_INTERVAL = 512 * 1024;
+const BINARY_RELAY_ACK_INTERVAL = 8 * 1024 * 1024;
 const MEMORY_FALLBACK_LIMIT = 128 * 1024 * 1024;
 const DIRECT_ROUTE_TIMEOUT = 12_000;
 
@@ -38,6 +43,7 @@ interface TransferSession {
   id: string;
   direction: "send" | "receive";
   transport: "webrtc" | "relay";
+  binaryRelay: boolean;
   peerId: string;
   peerName: string;
   pc?: RTCPeerConnection;
@@ -68,8 +74,17 @@ interface FileTransferOptions {
     listener: (from: string, signal: SignalPayload) => void,
   ) => () => void;
   sendRelayFile: (to: string, payload: RelayFilePayload) => Promise<void>;
+  sendRelayChunk: (
+    to: string,
+    transferId: string,
+    offset: number,
+    chunk: ArrayBuffer,
+  ) => Promise<void>;
   subscribeToRelayFiles: (
     listener: (from: string, payload: RelayFilePayload) => void,
+  ) => () => void;
+  subscribeToRelayChunks: (
+    listener: (from: string, transferId: string, offset: number, chunk: ArrayBuffer) => void,
   ) => () => void;
 }
 
@@ -120,6 +135,14 @@ function relayControl(session: TransferSession, message: ControlMessage): RelayF
       size: message.size,
       mime: message.mime,
       lastModified: message.lastModified,
+      binary: true,
+    };
+  }
+  if (message.type === "accept") {
+    return {
+      kind: "accept",
+      transferId: session.id,
+      ...(session.binaryRelay ? { binary: true as const } : {}),
     };
   }
   if (message.type === "transfer-error") {
@@ -137,7 +160,9 @@ export function useFileTransfer({
   sendSignal,
   subscribeToSignals,
   sendRelayFile,
+  sendRelayChunk,
   subscribeToRelayFiles,
+  subscribeToRelayChunks,
 }: FileTransferOptions) {
   const [transfers, setTransfers] = useState<TransferItem[]>([]);
   const [notice, setNotice] = useState("");
@@ -249,8 +274,11 @@ export function useFileTransfer({
           status: session.paused ? "paused" : "transferring",
         });
       }
+      const ackInterval = session.transport === "relay" && session.binaryRelay
+        ? BINARY_RELAY_ACK_INTERVAL
+        : DIRECT_ACK_INTERVAL;
       if (
-        session.received - session.lastAck >= ACK_INTERVAL ||
+        session.received - session.lastAck >= ackInterval ||
         session.received === session.offer?.size
       ) {
         session.lastAck = session.received;
@@ -271,9 +299,12 @@ export function useFileTransfer({
         if (session.transport === "webrtc" && session.channel?.readyState !== "open") {
           throw new Error("The direct connection closed");
         }
+        const maxInFlight = session.transport === "relay" && session.binaryRelay
+          ? BINARY_RELAY_MAX_IN_FLIGHT
+          : DIRECT_MAX_IN_FLIGHT;
         if (
           session.paused ||
-          session.sent - session.acked >= MAX_IN_FLIGHT ||
+          session.sent - session.acked >= maxInFlight ||
           (session.transport === "webrtc" && (session.channel?.bufferedAmount ?? 0) >= MAX_CHANNEL_BUFFER)
         ) {
           await waitForFlow(session);
@@ -281,15 +312,24 @@ export function useFileTransfer({
         }
 
         const offset = session.sent;
-        const end = Math.min(file.size, offset + CHUNK_SIZE);
+        const chunkSize = session.transport === "webrtc"
+          ? DIRECT_CHUNK_SIZE
+          : session.binaryRelay
+            ? BINARY_RELAY_CHUNK_SIZE
+            : LEGACY_RELAY_CHUNK_SIZE;
+        const end = Math.min(file.size, offset + chunkSize);
         const chunk = await file.slice(offset, end).arrayBuffer();
         if (session.transport === "relay") {
-          await sendRelayFile(session.peerId, {
-            kind: "chunk",
-            transferId: session.id,
-            offset,
-            data: arrayBufferToBase64Url(chunk),
-          });
+          if (session.binaryRelay) {
+            await sendRelayChunk(session.peerId, session.id, offset, chunk);
+          } else {
+            await sendRelayFile(session.peerId, {
+              kind: "chunk",
+              transferId: session.id,
+              offset,
+              data: arrayBufferToBase64Url(chunk),
+            });
+          }
         } else {
           session.channel?.send(chunk);
         }
@@ -300,7 +340,7 @@ export function useFileTransfer({
     } catch (error) {
       failSession(session, error instanceof Error ? error.message : "The file transfer stopped");
     }
-  }, [failSession, sendRelayFile, sendSessionControl, updateTransfer, waitForFlow]);
+  }, [failSession, sendRelayChunk, sendRelayFile, sendSessionControl, updateTransfer, waitForFlow]);
 
   const handleControl = useCallback((session: TransferSession, message: ControlMessage) => {
     if (message.type === "file-offer" && session.direction === "receive") {
@@ -452,6 +492,7 @@ export function useFileTransfer({
       id,
       direction,
       transport: "webrtc",
+      binaryRelay: false,
       peerId,
       peerName,
       pc,
@@ -554,6 +595,7 @@ export function useFileTransfer({
         id: payload.transferId,
         direction: "receive",
         transport: "relay",
+        binaryRelay: payload.binary === true,
         peerId: from,
         peerName,
         offer,
@@ -615,13 +657,38 @@ export function useFileTransfer({
       eof: { type: "eof" },
       complete: { type: "complete" },
     };
-    if (payload.kind === "ack") handleControl(session, { type: "ack", received: payload.received });
+    if (payload.kind === "accept") {
+      session.binaryRelay = payload.binary === true;
+      handleControl(session, { type: "accept" });
+    } else if (payload.kind === "ack") handleControl(session, { type: "ack", received: payload.received });
     else if (payload.kind === "error") failSession(session, payload.message, false);
     else {
       const message = controls[payload.kind];
       if (message) handleControl(session, message);
     }
   }, [failSession, handleControl, receiveChunk]);
+
+  const processRelayChunk = useCallback((
+    from: string,
+    transferId: string,
+    offset: number,
+    chunk: ArrayBuffer,
+  ) => {
+    const session = sessionsRef.current.get(transferId);
+    if (
+      !session ||
+      session.transport !== "relay" ||
+      !session.binaryRelay ||
+      session.peerId !== from ||
+      session.closed
+    ) return;
+    if (offset !== session.nextOffset) {
+      failSession(session, "File chunks arrived out of order");
+      return;
+    }
+    session.nextOffset += chunk.byteLength;
+    receiveChunk(session, chunk);
+  }, [failSession, receiveChunk]);
 
   useEffect(() => subscribeToSignals((from, signal) => {
     const previous = signalChainsRef.current.get(signal.transferId) ?? Promise.resolve();
@@ -648,6 +715,18 @@ export function useFileTransfer({
       });
     relayChainsRef.current.set(payload.transferId, next);
   }), [failSession, processRelayFile, subscribeToRelayFiles]);
+
+  useEffect(() => subscribeToRelayChunks((from, transferId, offset, chunk) => {
+    const previous = relayChainsRef.current.get(transferId) ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(() => processRelayChunk(from, transferId, offset, chunk))
+      .catch(() => {
+        const session = sessionsRef.current.get(transferId);
+        if (session) failSession(session, "The encrypted file relay stopped");
+      });
+    relayChainsRef.current.set(transferId, next);
+  }), [failSession, processRelayChunk, subscribeToRelayChunks]);
 
   useEffect(() => () => {
     for (const session of sessionsRef.current.values()) {
