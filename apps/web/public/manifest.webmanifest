@@ -1,0 +1,18 @@
+{
+  "name": "CopyPaesto",
+  "short_name": "CopyPaesto",
+  "description": "A private live clipboard and direct file bridge between your machines.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "background_color": "#f1efe8",
+  "theme_color": "#f1efe8",
+  "icons": [
+    {
+      "src": "copypaesto-mark.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

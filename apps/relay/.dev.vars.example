@@ -1,0 +1,4 @@
+# Copy this file to .dev.vars for local TURN testing. Never commit .dev.vars.
+ALLOWED_ORIGINS=http://localhost:5173
+TURN_KEY_ID=
+TURN_KEY_API_TOKEN=

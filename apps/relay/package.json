@@ -1,0 +1,16 @@
+{
+  "name": "@copypaesto/relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --port 8787",
+    "check": "tsc --noEmit --pretty false",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260718.1",
+    "typescript": "7.0.2",
+    "wrangler": "4.112.0"
+  }
+}

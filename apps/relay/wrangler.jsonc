@@ -1,0 +1,23 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "copypaesto-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-18",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ROOMS",
+        "class_name": "ClipboardRoom"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ClipboardRoom"]
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
