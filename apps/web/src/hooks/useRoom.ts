@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { decryptValue, deriveSessionCredentials, encryptValue } from "../lib/crypto";
+import { openRelayChunk, sealRelayChunk } from "../lib/fileRelay";
 import { RoomRelay, type TurnAccess } from "../lib/relay";
 import { normalizeSessionCode } from "../lib/session";
 import type {
@@ -48,6 +49,12 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
   const relayFileSendChainsRef = useRef(new Map<string, Promise<void>>());
   const relayFileReceiveChainRef = useRef(Promise.resolve());
   const relayFileListenersRef = useRef(new Set<(from: string, payload: RelayFilePayload) => void>());
+  const relayChunkListenersRef = useRef(new Set<(
+    from: string,
+    transferId: string,
+    offset: number,
+    chunk: ArrayBuffer,
+  ) => void>());
   const readyRef = useRef(false);
 
   const flushSlot = useCallback((slot: number, text: string) => {
@@ -81,6 +88,7 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
     keyRef.current = null;
     turnAccessRef.current = null;
     readyRef.current = false;
+    relayFileReceiveChainRef.current = Promise.resolve();
 
     const handleMessage = async (message: ServerMessage) => {
       const key = keyRef.current;
@@ -200,6 +208,21 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
                 });
               }
             },
+            onBinary: (frame) => {
+              relayFileReceiveChainRef.current = relayFileReceiveChainRef.current
+                .catch(() => undefined)
+                .then(async () => {
+                  const key = keyRef.current;
+                  if (!key || stopped) return;
+                  const opened = await openRelayChunk(key, frame);
+                  for (const listener of relayChunkListenersRef.current) {
+                    listener(opened.from, opened.transferId, opened.offset, opened.chunk);
+                  }
+                })
+                .catch(() => {
+                  setStatusDetail("A protected file chunk could not be opened");
+                });
+            },
             onClose: (event) => {
               readyRef.current = false;
               if (stopped) return;
@@ -316,9 +339,43 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
     return next;
   }, []);
 
+  const sendRelayChunk = useCallback((
+    to: string,
+    transferId: string,
+    offset: number,
+    chunk: ArrayBuffer,
+  ) => {
+    const previous = relayFileSendChainsRef.current.get(transferId) ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(async () => {
+        const key = keyRef.current;
+        if (!key || !readyRef.current) throw new Error("Session is not connected");
+        const frame = await sealRelayChunk(key, to, transferId, offset, chunk);
+        if (!relayRef.current?.sendBinary(frame)) throw new Error("Session is not connected");
+      });
+    relayFileSendChainsRef.current.set(transferId, next);
+    void next.finally(() => {
+      if (relayFileSendChainsRef.current.get(transferId) === next) {
+        relayFileSendChainsRef.current.delete(transferId);
+      }
+    }).catch(() => undefined);
+    return next;
+  }, []);
+
   const subscribeToRelayFiles = useCallback((listener: (from: string, payload: RelayFilePayload) => void) => {
     relayFileListenersRef.current.add(listener);
     return () => relayFileListenersRef.current.delete(listener);
+  }, []);
+
+  const subscribeToRelayChunks = useCallback((listener: (
+    from: string,
+    transferId: string,
+    offset: number,
+    chunk: ArrayBuffer,
+  ) => void) => {
+    relayChunkListenersRef.current.add(listener);
+    return () => relayChunkListenersRef.current.delete(listener);
   }, []);
 
   return useMemo(() => ({
@@ -332,17 +389,21 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
     sendSignal,
     subscribeToSignals,
     sendRelayFile,
+    sendRelayChunk,
     subscribeToRelayFiles,
+    subscribeToRelayChunks,
   }), [
     lastSyncedAt,
     peers,
     sendSignal,
     sendRelayFile,
+    sendRelayChunk,
     slots,
     status,
     statusDetail,
     subscribeToSignals,
     subscribeToRelayFiles,
+    subscribeToRelayChunks,
     turnAccess,
     updateSlot,
   ]);

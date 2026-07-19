@@ -29,9 +29,9 @@ An attacker who guesses an active 5-digit code can create a visible approval req
 
 - Direct WebRTC is attempted first.
 - If it cannot connect, the transfer restarts over the authenticated room WebSocket.
-- Fallback file names, control messages, and 32 KiB chunks are AES-GCM encrypted end to end.
-- The Worker forwards encrypted envelopes without storing file chunks.
-- Sender acknowledgements cap outstanding fallback data at about 4 MiB.
+- Fallback file names, control messages, and 512 KiB binary chunks are AES-GCM encrypted end to end.
+- The Worker routes encrypted binary frames without storing file chunks or converting them to Base64.
+- Sender acknowledgements cap outstanding fallback data at about 32 MiB.
 - Optional TURN credentials are available only through a room-authenticated endpoint; the long-lived TURN key remains a Worker secret.
 
 ## What Cloudflare can observe

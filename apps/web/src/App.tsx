@@ -546,7 +546,9 @@ function Workspace({ session, deviceName, onLeave }: {
     sendSignal: room.sendSignal,
     subscribeToSignals: room.subscribeToSignals,
     sendRelayFile: room.sendRelayFile,
+    sendRelayChunk: room.sendRelayChunk,
     subscribeToRelayFiles: room.subscribeToRelayFiles,
+    subscribeToRelayChunks: room.subscribeToRelayChunks,
   });
   const [activeSlot, setActiveSlot] = useState(0);
   const [showSession, setShowSession] = useState(false);
