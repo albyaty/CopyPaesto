@@ -69,12 +69,23 @@ export class RoomRelay {
   }
 }
 
-export async function fetchIceServers(): Promise<{
+export interface TurnAccess {
+  roomId: string;
+  authVerifier: string;
+}
+
+export async function fetchIceServers(access: TurnAccess): Promise<{
   iceServers: RTCIceServer[];
   relayAvailable: boolean;
 }> {
   try {
-    const response = await fetch(`${relayHttpOrigin()}/turn`);
+    const response = await fetch(
+      `${relayHttpOrigin()}/rooms/${encodeURIComponent(access.roomId)}/turn`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${access.authVerifier}` },
+      },
+    );
     if (!response.ok) throw new Error("TURN configuration unavailable");
     return await response.json() as { iceServers: RTCIceServer[]; relayAvailable: boolean };
   } catch {

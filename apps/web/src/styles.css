@@ -344,6 +344,127 @@ svg {
   letter-spacing: 0.28em;
 }
 
+.pairing-code-input {
+  max-width: 260px;
+  padding-bottom: 9px;
+  font-size: clamp(38px, 4vw, 54px);
+  font-variant-numeric: tabular-nums;
+  font-weight: 720;
+  letter-spacing: 0.22em;
+}
+
+.pairing-stage h2 {
+  margin-bottom: 22px;
+}
+
+.pairing-code-display {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin: 2px 0 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pairing-code-display span {
+  display: grid;
+  min-width: 0;
+  height: 76px;
+  place-items: center;
+  border-bottom: 2px solid var(--acid);
+  color: var(--acid);
+  background: rgba(250, 249, 245, 0.055);
+  font-size: clamp(34px, 3.7vw, 54px);
+  font-weight: 760;
+  animation: digit-in 360ms cubic-bezier(.2,.75,.25,1) both;
+}
+
+.pairing-code-display span:nth-child(2) { animation-delay: 40ms; }
+.pairing-code-display span:nth-child(3) { animation-delay: 80ms; }
+.pairing-code-display span:nth-child(4) { animation-delay: 120ms; }
+.pairing-code-display span:nth-child(5) { animation-delay: 160ms; }
+
+.pairing-code-display.compact span {
+  height: 58px;
+  font-size: 32px;
+}
+
+.copy-pairing-code {
+  width: max-content;
+  border: 0;
+  border-bottom: 1px solid rgba(250, 249, 245, 0.3);
+  padding: 3px 0;
+  color: rgba(250, 249, 245, 0.65);
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.pairing-wait {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin-top: 32px;
+  color: rgba(250, 249, 245, 0.58);
+  font-size: 12px;
+}
+
+.pairing-wait i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--acid);
+  box-shadow: 0 0 0 0 rgba(199, 248, 91, 0.5);
+  animation: waiting-pulse 1.5s ease-out infinite;
+}
+
+.approval-request {
+  margin-top: 28px;
+  padding: 22px 0 4px;
+  border-top: 1px solid rgba(250, 249, 245, 0.2);
+  animation: content-in 300ms ease-out both;
+}
+
+.approval-request > span {
+  color: var(--acid);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.15em;
+}
+
+.approval-request > strong {
+  display: block;
+  margin-top: 9px;
+  color: var(--white);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 28px;
+  font-weight: 400;
+}
+
+.approval-request > p {
+  margin: 6px 0 17px;
+}
+
+.approval-request > div {
+  display: flex;
+  gap: 9px;
+}
+
+.approval-request button {
+  min-height: 40px;
+  border: 1px solid rgba(250, 249, 245, 0.22);
+  padding: 0 16px;
+  color: rgba(250, 249, 245, 0.7);
+  background: transparent;
+  cursor: pointer;
+}
+
+.approval-request .approve-button {
+  border-color: var(--acid);
+  color: var(--ink);
+  background: var(--acid);
+  font-weight: 750;
+}
+
 .primary-action,
 .secondary-action {
   border: 0;
@@ -367,6 +488,13 @@ svg {
 .primary-action:hover {
   background: #d5ff78;
   transform: translateY(-2px);
+}
+
+.primary-action:disabled,
+.approval-request button:disabled {
+  cursor: wait;
+  opacity: 0.62;
+  transform: none;
 }
 
 .primary-action svg {
@@ -1037,6 +1165,45 @@ svg {
   line-height: 1.5;
 }
 
+.session-fact {
+  display: grid;
+  grid-template-columns: 46px 1fr;
+  gap: 17px;
+  align-items: start;
+  padding: 22px 0;
+  border-top: 1px solid rgba(250, 249, 245, 0.17);
+}
+
+.session-fact > svg {
+  width: 28px;
+  height: 28px;
+  color: var(--acid);
+}
+
+.session-fact-number {
+  color: var(--acid);
+  font-size: 19px;
+  font-weight: 760;
+  letter-spacing: -0.04em;
+}
+
+.session-fact > div {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.session-fact strong {
+  color: var(--white);
+  font-size: 14px;
+}
+
+.session-fact span {
+  color: rgba(250, 249, 245, 0.47);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
 .session-denied {
   min-height: 100svh;
   display: flex;
@@ -1093,6 +1260,16 @@ svg {
 @keyframes content-in {
   from { opacity: 0; transform: translateX(8px); }
   to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes digit-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes waiting-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(199, 248, 91, 0.5); }
+  70%, 100% { box-shadow: 0 0 0 9px rgba(199, 248, 91, 0); }
 }
 
 @keyframes travel {
@@ -1347,6 +1524,22 @@ svg {
 
   .credential-row strong {
     font-size: 16px;
+  }
+}
+
+@media (max-width: 520px) {
+  .pairing-code-display {
+    gap: 5px;
+  }
+
+  .pairing-code-display span {
+    height: 62px;
+    font-size: 34px;
+  }
+
+  .pairing-code-input {
+    max-width: 230px;
+    font-size: 42px;
   }
 }
 

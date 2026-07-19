@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchIceServers } from "../lib/relay";
-import type { Peer, SignalPayload, TransferItem } from "../types";
+import { fetchIceServers, type TurnAccess } from "../lib/relay";
+import type { Peer, RelayFilePayload, SignalPayload, TransferItem } from "../types";
 
 const CHUNK_SIZE = 32 * 1024;
 const MAX_IN_FLIGHT = 4 * 1024 * 1024;
 const MAX_CHANNEL_BUFFER = 1024 * 1024;
 const ACK_INTERVAL = 512 * 1024;
 const MEMORY_FALLBACK_LIMIT = 128 * 1024 * 1024;
+const DIRECT_ROUTE_TIMEOUT = 12_000;
 
 interface FileOffer {
   type: "file-offer";
@@ -36,10 +37,12 @@ interface WritableTarget {
 interface TransferSession {
   id: string;
   direction: "send" | "receive";
+  transport: "webrtc" | "relay";
   peerId: string;
   peerName: string;
-  pc: RTCPeerConnection;
+  pc?: RTCPeerConnection;
   channel?: RTCDataChannel;
+  fallbackTimer?: number;
   file?: File;
   offer?: FileOffer;
   writable?: WritableTarget;
@@ -47,7 +50,9 @@ interface TransferSession {
   sent: number;
   acked: number;
   received: number;
+  nextOffset: number;
   lastAck: number;
+  lastProgressAt: number;
   paused: boolean;
   started: boolean;
   closed: boolean;
@@ -57,9 +62,14 @@ interface TransferSession {
 
 interface FileTransferOptions {
   peers: Peer[];
+  turnAccess: TurnAccess | null;
   sendSignal: (to: string, signal: SignalPayload) => Promise<void>;
   subscribeToSignals: (
     listener: (from: string, signal: SignalPayload) => void,
+  ) => () => void;
+  sendRelayFile: (to: string, payload: RelayFilePayload) => Promise<void>;
+  subscribeToRelayFiles: (
+    listener: (from: string, payload: RelayFilePayload) => void,
   ) => () => void;
 }
 
@@ -85,15 +95,58 @@ function triggerMemoryDownload(name: string, mime: string, chunks: ArrayBuffer[]
   window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
-export function useFileTransfer({ peers, sendSignal, subscribeToSignals }: FileTransferOptions) {
+function arrayBufferToBase64Url(buffer: ArrayBuffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const windowSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += windowSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + windowSize));
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64UrlToArrayBuffer(value: string) {
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const binary = atob(padded);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0)).buffer as ArrayBuffer;
+}
+
+function relayControl(session: TransferSession, message: ControlMessage): RelayFilePayload {
+  if (message.type === "file-offer") {
+    return {
+      kind: "offer",
+      transferId: session.id,
+      name: message.name,
+      size: message.size,
+      mime: message.mime,
+      lastModified: message.lastModified,
+    };
+  }
+  if (message.type === "transfer-error") {
+    return { kind: "error", transferId: session.id, message: message.message };
+  }
+  if (message.type === "ack") {
+    return { kind: "ack", transferId: session.id, received: message.received };
+  }
+  return { kind: message.type, transferId: session.id } as RelayFilePayload;
+}
+
+export function useFileTransfer({
+  peers,
+  turnAccess,
+  sendSignal,
+  subscribeToSignals,
+  sendRelayFile,
+  subscribeToRelayFiles,
+}: FileTransferOptions) {
   const [transfers, setTransfers] = useState<TransferItem[]>([]);
-  const [relayAvailable, setRelayAvailable] = useState(false);
   const [notice, setNotice] = useState("");
   const sessionsRef = useRef(new Map<string, TransferSession>());
   const pendingCandidatesRef = useRef(new Map<string, RTCIceCandidateInit[]>());
   const signalChainsRef = useRef(new Map<string, Promise<void>>());
+  const relayChainsRef = useRef(new Map<string, Promise<void>>());
   const peersRef = useRef(peers);
-  const iceConfigRef = useRef<Promise<RTCConfiguration> | null>(null);
+  const iceConfigRef = useRef<{ key: string; promise: Promise<RTCConfiguration> } | null>(null);
 
   peersRef.current = peers;
 
@@ -101,35 +154,21 @@ export function useFileTransfer({ peers, sendSignal, subscribeToSignals }: FileT
     setTransfers((current) => current.map((item) => item.id === id ? { ...item, ...patch } : item));
   }, []);
 
-  const failSession = useCallback((session: TransferSession, error: string) => {
-    if (session.closed) return;
-    session.closed = true;
-    updateTransfer(session.id, { status: "failed", error });
-    try {
-      control(session.channel, { type: "transfer-error", message: error });
-      session.channel?.close();
-      session.pc.close();
-      void session.writable?.abort?.(error);
-    } catch {
-      // The connection is already gone.
-    }
-    for (const resolve of session.flowWaiters) resolve();
-    session.flowWaiters.clear();
-  }, [updateTransfer]);
-
   const iceConfiguration = useCallback(async () => {
-    if (!iceConfigRef.current) {
-      iceConfigRef.current = fetchIceServers().then((result) => {
-        setRelayAvailable(result.relayAvailable);
-        return { iceServers: result.iceServers };
-      });
+    if (!turnAccess) return { iceServers: [{ urls: "stun:stun.cloudflare.com:3478" }] };
+    const key = `${turnAccess.roomId}:${turnAccess.authVerifier}`;
+    if (iceConfigRef.current?.key !== key) {
+      iceConfigRef.current = {
+        key,
+        promise: fetchIceServers(turnAccess).then((result) => ({ iceServers: result.iceServers })),
+      };
     }
-    return iceConfigRef.current;
-  }, []);
+    return iceConfigRef.current.promise;
+  }, [turnAccess]);
 
   useEffect(() => {
-    void iceConfiguration();
-  }, [iceConfiguration]);
+    if (turnAccess) void iceConfiguration();
+  }, [iceConfiguration, turnAccess]);
 
   const notifyFlow = useCallback((session: TransferSession) => {
     for (const resolve of session.flowWaiters) resolve();
@@ -146,6 +185,33 @@ export function useFileTransfer({ peers, sendSignal, subscribeToSignals }: FileT
     session.flowWaiters.add(done);
   }), []);
 
+  const sendSessionControl = useCallback(async (session: TransferSession, message: ControlMessage) => {
+    if (session.transport === "relay") {
+      await sendRelayFile(session.peerId, relayControl(session, message));
+      return;
+    }
+    if (session.channel?.readyState !== "open") throw new Error("The direct connection is not open");
+    control(session.channel, message);
+  }, [sendRelayFile]);
+
+  const failSession = useCallback((session: TransferSession, error: string, notifyPeer = true) => {
+    if (session.closed) return;
+    session.closed = true;
+    window.clearTimeout(session.fallbackTimer);
+    updateTransfer(session.id, { status: "failed", error });
+    if (notifyPeer) {
+      void sendSessionControl(session, { type: "transfer-error", message: error }).catch(() => undefined);
+    }
+    try {
+      session.channel?.close();
+      session.pc?.close();
+      void session.writable?.abort?.(error);
+    } catch {
+      // The connection is already gone.
+    }
+    notifyFlow(session);
+  }, [notifyFlow, sendSessionControl, updateTransfer]);
+
   const finishReceiver = useCallback(async (session: TransferSession) => {
     try {
       await session.writeQueue;
@@ -154,23 +220,18 @@ export function useFileTransfer({ peers, sendSignal, subscribeToSignals }: FileT
         throw new Error(`Transfer ended at ${session.received} of ${session.offer.size} bytes`);
       }
       if (session.writable) await session.writable.close();
-      if (session.chunks) {
-        triggerMemoryDownload(session.offer.name, session.offer.mime, session.chunks);
-      }
-      control(session.channel, { type: "complete" });
-      updateTransfer(session.id, {
-        transferred: session.received,
-        status: "complete",
-      });
+      if (session.chunks) triggerMemoryDownload(session.offer.name, session.offer.mime, session.chunks);
+      await sendSessionControl(session, { type: "complete" });
+      updateTransfer(session.id, { transferred: session.received, status: "complete" });
       session.closed = true;
       window.setTimeout(() => {
         session.channel?.close();
-        session.pc.close();
+        session.pc?.close();
       }, 800);
     } catch (error) {
       failSession(session, error instanceof Error ? error.message : "Could not finish the file");
     }
-  }, [failSession, updateTransfer]);
+  }, [failSession, sendSessionControl, updateTransfer]);
 
   const receiveChunk = useCallback((session: TransferSession, chunk: ArrayBuffer) => {
     if (session.direction !== "receive" || session.closed) return;
@@ -180,51 +241,66 @@ export function useFileTransfer({ peers, sendSignal, subscribeToSignals }: FileT
       else throw new Error("The file has not been accepted");
 
       session.received += chunk.byteLength;
-      updateTransfer(session.id, {
-        transferred: session.received,
-        status: session.paused ? "paused" : "transferring",
-      });
+      const now = performance.now();
+      if (session.received === session.offer?.size || now - session.lastProgressAt >= 100) {
+        session.lastProgressAt = now;
+        updateTransfer(session.id, {
+          transferred: session.received,
+          status: session.paused ? "paused" : "transferring",
+        });
+      }
       if (
         session.received - session.lastAck >= ACK_INTERVAL ||
         session.received === session.offer?.size
       ) {
         session.lastAck = session.received;
-        control(session.channel, { type: "ack", received: session.received });
+        await sendSessionControl(session, { type: "ack", received: session.received });
       }
     }).catch((error) => {
       failSession(session, error instanceof Error ? error.message : "Could not write the file");
     });
-  }, [failSession, updateTransfer]);
+  }, [failSession, sendSessionControl, updateTransfer]);
 
   const sendFileData = useCallback(async (session: TransferSession) => {
-    if (!session.file || !session.channel || session.started) return;
+    if (!session.file || session.started) return;
     session.started = true;
-    const { file, channel } = session;
+    const { file } = session;
     try {
       while (session.sent < file.size) {
-        if (session.closed || channel.readyState !== "open") {
-          throw new Error("The other machine disconnected");
+        if (session.closed) throw new Error("The other computer disconnected");
+        if (session.transport === "webrtc" && session.channel?.readyState !== "open") {
+          throw new Error("The direct connection closed");
         }
         if (
           session.paused ||
           session.sent - session.acked >= MAX_IN_FLIGHT ||
-          channel.bufferedAmount >= MAX_CHANNEL_BUFFER
+          (session.transport === "webrtc" && (session.channel?.bufferedAmount ?? 0) >= MAX_CHANNEL_BUFFER)
         ) {
           await waitForFlow(session);
           continue;
         }
 
-        const end = Math.min(file.size, session.sent + CHUNK_SIZE);
-        const chunk = await file.slice(session.sent, end).arrayBuffer();
-        channel.send(chunk);
+        const offset = session.sent;
+        const end = Math.min(file.size, offset + CHUNK_SIZE);
+        const chunk = await file.slice(offset, end).arrayBuffer();
+        if (session.transport === "relay") {
+          await sendRelayFile(session.peerId, {
+            kind: "chunk",
+            transferId: session.id,
+            offset,
+            data: arrayBufferToBase64Url(chunk),
+          });
+        } else {
+          session.channel?.send(chunk);
+        }
         session.sent = end;
       }
       updateTransfer(session.id, { status: "finishing" });
-      control(channel, { type: "eof" });
+      await sendSessionControl(session, { type: "eof" });
     } catch (error) {
       failSession(session, error instanceof Error ? error.message : "The file transfer stopped");
     }
-  }, [failSession, updateTransfer, waitForFlow]);
+  }, [failSession, sendRelayFile, sendSessionControl, updateTransfer, waitForFlow]);
 
   const handleControl = useCallback((session: TransferSession, message: ControlMessage) => {
     if (message.type === "file-offer" && session.direction === "receive") {
@@ -245,7 +321,7 @@ export function useFileTransfer({ peers, sendSignal, subscribeToSignals }: FileT
     }
 
     if (message.type === "accept" && session.direction === "send") {
-      updateTransfer(session.id, { status: "transferring" });
+      updateTransfer(session.id, { status: "transferring", error: undefined });
       void sendFileData(session);
       return;
     }
@@ -253,7 +329,7 @@ export function useFileTransfer({ peers, sendSignal, subscribeToSignals }: FileT
     if (message.type === "decline") {
       updateTransfer(session.id, { status: "declined" });
       session.closed = true;
-      session.pc.close();
+      session.pc?.close();
       notifyFlow(session);
       return;
     }
@@ -287,12 +363,43 @@ export function useFileTransfer({ peers, sendSignal, subscribeToSignals }: FileT
     if (message.type === "complete" && session.direction === "send") {
       updateTransfer(session.id, { transferred: session.file?.size ?? session.acked, status: "complete" });
       session.closed = true;
-      window.setTimeout(() => session.pc.close(), 800);
+      window.setTimeout(() => session.pc?.close(), 800);
       return;
     }
 
-    if (message.type === "transfer-error") failSession(session, message.message);
+    if (message.type === "transfer-error") failSession(session, message.message, false);
   }, [failSession, finishReceiver, notifyFlow, sendFileData, updateTransfer]);
+
+  const fallbackToRelay = useCallback(async (session: TransferSession) => {
+    if (session.closed || session.transport === "relay" || session.direction !== "send" || !session.file) return;
+    window.clearTimeout(session.fallbackTimer);
+    session.transport = "relay";
+    session.channel?.close();
+    session.pc?.close();
+    session.channel = undefined;
+    session.pc = undefined;
+    session.started = false;
+    session.sent = 0;
+    session.acked = 0;
+    session.received = 0;
+    session.nextOffset = 0;
+    session.lastAck = 0;
+    session.lastProgressAt = 0;
+    updateTransfer(session.id, { status: "connecting", transferred: 0, error: undefined });
+    setNotice("The direct connection was blocked, so this file is using the encrypted relay.");
+    try {
+      await sendSessionControl(session, {
+        type: "file-offer",
+        name: session.file.name,
+        size: session.file.size,
+        mime: session.file.type,
+        lastModified: session.file.lastModified,
+      });
+      updateTransfer(session.id, { status: "waiting" });
+    } catch (error) {
+      failSession(session, error instanceof Error ? error.message : "The encrypted relay could not start");
+    }
+  }, [failSession, sendSessionControl, updateTransfer]);
 
   const attachChannel = useCallback((session: TransferSession, channel: RTCDataChannel) => {
     session.channel = channel;
@@ -300,6 +407,8 @@ export function useFileTransfer({ peers, sendSignal, subscribeToSignals }: FileT
     channel.bufferedAmountLowThreshold = MAX_CHANNEL_BUFFER / 2;
     channel.addEventListener("bufferedamountlow", () => notifyFlow(session));
     channel.addEventListener("open", () => {
+      window.clearTimeout(session.fallbackTimer);
+      if (session.transport !== "webrtc") return;
       if (session.direction === "send" && session.file) {
         control(channel, {
           type: "file-offer",
@@ -312,32 +421,37 @@ export function useFileTransfer({ peers, sendSignal, subscribeToSignals }: FileT
       }
     });
     channel.addEventListener("message", (event) => {
+      if (session.transport !== "webrtc") return;
       if (typeof event.data === "string") {
         try {
           handleControl(session, JSON.parse(event.data) as ControlMessage);
         } catch {
-          failSession(session, "The other machine sent an invalid transfer message");
+          failSession(session, "The other computer sent an invalid transfer message");
         }
       } else if (event.data instanceof ArrayBuffer) {
+        session.nextOffset += event.data.byteLength;
         receiveChunk(session, event.data);
       }
     });
     channel.addEventListener("close", () => {
-      if (!session.closed) failSession(session, "The transfer connection closed early");
+      if (session.closed || session.transport !== "webrtc") return;
+      if (session.direction === "send" && session.sent === 0) void fallbackToRelay(session);
+      else if (session.received > 0 || session.started) failSession(session, "The transfer connection closed early");
     });
-  }, [failSession, handleControl, notifyFlow, receiveChunk, updateTransfer]);
+  }, [failSession, fallbackToRelay, handleControl, notifyFlow, receiveChunk, updateTransfer]);
 
-  const createSession = useCallback(async (
+  const createDirectSession = useCallback(async (
     id: string,
     direction: "send" | "receive",
     peerId: string,
     file?: File,
   ) => {
     const pc = new RTCPeerConnection(await iceConfiguration());
-    const peerName = peersRef.current.find((peer) => peer.id === peerId)?.name ?? "Other machine";
+    const peerName = peersRef.current.find((peer) => peer.id === peerId)?.name ?? "Other computer";
     const session: TransferSession = {
       id,
       direction,
+      transport: "webrtc",
       peerId,
       peerName,
       pc,
@@ -345,7 +459,9 @@ export function useFileTransfer({ peers, sendSignal, subscribeToSignals }: FileT
       sent: 0,
       acked: 0,
       received: 0,
+      nextOffset: 0,
       lastAck: 0,
+      lastProgressAt: 0,
       paused: false,
       started: false,
       closed: false,
@@ -354,60 +470,158 @@ export function useFileTransfer({ peers, sendSignal, subscribeToSignals }: FileT
     };
     sessionsRef.current.set(id, session);
 
+    if (direction === "send") {
+      session.fallbackTimer = window.setTimeout(() => void fallbackToRelay(session), DIRECT_ROUTE_TIMEOUT);
+    }
     pc.addEventListener("icecandidate", (event) => {
-      if (event.candidate) {
+      if (event.candidate && session.transport === "webrtc") {
         void sendSignal(peerId, {
           kind: "ice",
           transferId: id,
           candidate: event.candidate.toJSON(),
-        }).catch(() => failSession(session, "Could not negotiate the file connection"));
+        }).catch(() => {
+          if (session.direction === "send" && session.sent === 0) void fallbackToRelay(session);
+          else failSession(session, "Could not negotiate the file connection");
+        });
       }
     });
     pc.addEventListener("connectionstatechange", () => {
-      if (pc.connectionState === "failed") failSession(session, "A direct route between the machines could not be made");
+      if (pc.connectionState !== "failed" || session.transport !== "webrtc" || session.closed) return;
+      if (session.direction === "send" && session.sent === 0) void fallbackToRelay(session);
+      else if (session.received > 0 || session.started) failSession(session, "A file route between the computers could not be made");
     });
     return session;
-  }, [failSession, iceConfiguration, sendSignal]);
+  }, [failSession, fallbackToRelay, iceConfiguration, sendSignal]);
 
   const addPendingCandidates = useCallback(async (session: TransferSession) => {
     const pending = pendingCandidatesRef.current.get(session.id) ?? [];
     pendingCandidatesRef.current.delete(session.id);
+    if (!session.pc || session.transport !== "webrtc") return;
     for (const candidate of pending) await session.pc.addIceCandidate(candidate);
   }, []);
 
   const processSignal = useCallback(async (from: string, signal: SignalPayload) => {
     if (signal.kind === "offer") {
       if (sessionsRef.current.has(signal.transferId)) return;
-      const session = await createSession(signal.transferId, "receive", from);
-      session.pc.addEventListener("datachannel", (event) => attachChannel(session, event.channel));
-      await session.pc.setRemoteDescription(signal.description);
+      const session = await createDirectSession(signal.transferId, "receive", from);
+      session.pc?.addEventListener("datachannel", (event) => attachChannel(session, event.channel));
+      await session.pc?.setRemoteDescription(signal.description);
       await addPendingCandidates(session);
+      if (!session.pc) return;
       const answer = await session.pc.createAnswer();
       await session.pc.setLocalDescription(answer);
-      await sendSignal(from, {
-        kind: "answer",
-        transferId: signal.transferId,
-        description: answer,
-      });
+      await sendSignal(from, { kind: "answer", transferId: signal.transferId, description: answer });
       return;
     }
 
     const session = sessionsRef.current.get(signal.transferId);
+    if (!session || session.transport !== "webrtc" || !session.pc) return;
     if (signal.kind === "answer") {
-      if (!session) return;
       await session.pc.setRemoteDescription(signal.description);
       await addPendingCandidates(session);
       return;
     }
 
-    if (!session || !session.pc.remoteDescription) {
+    if (!session.pc.remoteDescription) {
       const pending = pendingCandidatesRef.current.get(signal.transferId) ?? [];
       pending.push(signal.candidate);
       pendingCandidatesRef.current.set(signal.transferId, pending);
       return;
     }
     await session.pc.addIceCandidate(signal.candidate);
-  }, [addPendingCandidates, attachChannel, createSession, sendSignal]);
+  }, [addPendingCandidates, attachChannel, createDirectSession, sendSignal]);
+
+  const processRelayFile = useCallback(async (from: string, payload: RelayFilePayload) => {
+    if (payload.kind === "offer") {
+      const existing = sessionsRef.current.get(payload.transferId);
+      if (existing?.transport === "relay" && !existing.closed) return;
+      if (existing) {
+        existing.closed = true;
+        window.clearTimeout(existing.fallbackTimer);
+        existing.channel?.close();
+        existing.pc?.close();
+        void existing.writable?.abort?.("Switching to encrypted relay");
+      }
+      const peerName = peersRef.current.find((peer) => peer.id === from)?.name ?? "Other computer";
+      const offer: FileOffer = {
+        type: "file-offer",
+        name: payload.name,
+        size: payload.size,
+        mime: payload.mime,
+        lastModified: payload.lastModified,
+      };
+      const session: TransferSession = {
+        id: payload.transferId,
+        direction: "receive",
+        transport: "relay",
+        peerId: from,
+        peerName,
+        offer,
+        sent: 0,
+        acked: 0,
+        received: 0,
+        nextOffset: 0,
+        lastAck: 0,
+        lastProgressAt: 0,
+        paused: false,
+        started: false,
+        closed: false,
+        writeQueue: Promise.resolve(),
+        flowWaiters: new Set(),
+      };
+      sessionsRef.current.set(session.id, session);
+      setTransfers((current) => {
+        const item: TransferItem = {
+          id: session.id,
+          direction: "receive",
+          name: offer.name,
+          size: offer.size,
+          transferred: 0,
+          status: "offered",
+          peerName,
+        };
+        return current.some((currentItem) => currentItem.id === session.id)
+          ? current.map((currentItem) => currentItem.id === session.id ? item : currentItem)
+          : [item, ...current];
+      });
+      setNotice("The direct connection was blocked, so this file is using the encrypted relay.");
+      return;
+    }
+
+    const session = sessionsRef.current.get(payload.transferId);
+    if (!session || session.transport !== "relay" || session.peerId !== from || session.closed) return;
+    if (payload.kind === "chunk") {
+      let chunk: ArrayBuffer;
+      try {
+        chunk = base64UrlToArrayBuffer(payload.data);
+      } catch {
+        failSession(session, "An encrypted file chunk was invalid");
+        return;
+      }
+      if (payload.offset !== session.nextOffset) {
+        failSession(session, "File chunks arrived out of order");
+        return;
+      }
+      session.nextOffset += chunk.byteLength;
+      receiveChunk(session, chunk);
+      return;
+    }
+
+    const controls: Partial<Record<RelayFilePayload["kind"], ControlMessage>> = {
+      accept: { type: "accept" },
+      decline: { type: "decline" },
+      pause: { type: "pause" },
+      resume: { type: "resume" },
+      eof: { type: "eof" },
+      complete: { type: "complete" },
+    };
+    if (payload.kind === "ack") handleControl(session, { type: "ack", received: payload.received });
+    else if (payload.kind === "error") failSession(session, payload.message, false);
+    else {
+      const message = controls[payload.kind];
+      if (message) handleControl(session, message);
+    }
+  }, [failSession, handleControl, receiveChunk]);
 
   useEffect(() => subscribeToSignals((from, signal) => {
     const previous = signalChainsRef.current.get(signal.transferId) ?? Promise.resolve();
@@ -416,25 +630,43 @@ export function useFileTransfer({ peers, sendSignal, subscribeToSignals }: FileT
       .then(() => processSignal(from, signal))
       .catch(() => {
         const session = sessionsRef.current.get(signal.transferId);
-        if (session) failSession(session, "Could not set up the file connection");
+        if (!session) return;
+        if (session.direction === "send" && session.sent === 0) void fallbackToRelay(session);
+        else if (session.received > 0 || session.started) failSession(session, "Could not set up the file connection");
       });
     signalChainsRef.current.set(signal.transferId, next);
-  }), [failSession, processSignal, subscribeToSignals]);
+  }), [failSession, fallbackToRelay, processSignal, subscribeToSignals]);
+
+  useEffect(() => subscribeToRelayFiles((from, payload) => {
+    const previous = relayChainsRef.current.get(payload.transferId) ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(() => processRelayFile(from, payload))
+      .catch(() => {
+        const session = sessionsRef.current.get(payload.transferId);
+        if (session) failSession(session, "The encrypted file relay stopped");
+      });
+    relayChainsRef.current.set(payload.transferId, next);
+  }), [failSession, processRelayFile, subscribeToRelayFiles]);
 
   useEffect(() => () => {
     for (const session of sessionsRef.current.values()) {
       session.closed = true;
+      window.clearTimeout(session.fallbackTimer);
       session.channel?.close();
-      session.pc.close();
+      session.pc?.close();
       void session.writable?.abort?.("Session closed");
     }
     sessionsRef.current.clear();
+    pendingCandidatesRef.current.clear();
+    signalChainsRef.current.clear();
+    relayChainsRef.current.clear();
   }, []);
 
   const sendFiles = useCallback(async (files: File[]) => {
     const peer = peersRef.current[0];
     if (!peer) {
-      setNotice("Connect the second machine before sending a file.");
+      setNotice("Connect the second computer before sending a file.");
       return;
     }
     setNotice("");
@@ -451,22 +683,23 @@ export function useFileTransfer({ peers, sendSignal, subscribeToSignals }: FileT
         peerName: peer.name,
       }, ...current]);
       try {
-        const session = await createSession(id, "send", peer.id, file);
+        const session = await createDirectSession(id, "send", peer.id, file);
+        if (!session.pc) throw new Error("Direct transfer is unavailable");
         const channel = session.pc.createDataChannel(`copypaesto:${id}`, { ordered: true });
         attachChannel(session, channel);
         const offer = await session.pc.createOffer();
         await session.pc.setLocalDescription(offer);
         await sendSignal(peer.id, { kind: "offer", transferId: id, description: offer });
-      } catch (error) {
+      } catch {
         const session = sessionsRef.current.get(id);
-        if (session) failSession(session, error instanceof Error ? error.message : "Could not start the transfer");
+        if (session) await fallbackToRelay(session);
       }
     }
-  }, [attachChannel, createSession, failSession, sendSignal]);
+  }, [attachChannel, createDirectSession, fallbackToRelay, sendSignal]);
 
   const acceptTransfer = useCallback(async (id: string) => {
     const session = sessionsRef.current.get(id);
-    if (!session?.offer || !session.channel) return;
+    if (!session?.offer) return;
     try {
       const picker = (window as SavePickerWindow).showSaveFilePicker;
       if (picker) {
@@ -478,35 +711,36 @@ export function useFileTransfer({ peers, sendSignal, subscribeToSignals }: FileT
         setNotice("Files over 128 MB need Chrome or Edge so CopyPaesto can stream directly to disk.");
         return;
       }
-      updateTransfer(id, { status: "transferring" });
-      control(session.channel, { type: "accept" });
+      updateTransfer(id, { status: "transferring", error: undefined });
+      await sendSessionControl(session, { type: "accept" });
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return;
       failSession(session, error instanceof Error ? error.message : "Could not create the destination file");
     }
-  }, [failSession, updateTransfer]);
+  }, [failSession, sendSessionControl, updateTransfer]);
 
   const declineTransfer = useCallback((id: string) => {
     const session = sessionsRef.current.get(id);
     if (!session) return;
-    control(session.channel, { type: "decline" });
+    void sendSessionControl(session, { type: "decline" }).catch(() => undefined);
     session.closed = true;
     updateTransfer(id, { status: "declined" });
-    session.pc.close();
-  }, [updateTransfer]);
+    session.channel?.close();
+    session.pc?.close();
+  }, [sendSessionControl, updateTransfer]);
 
   const togglePause = useCallback((id: string) => {
     const session = sessionsRef.current.get(id);
-    if (!session?.channel || session.closed) return;
+    if (!session || session.closed) return;
     session.paused = !session.paused;
-    control(session.channel, { type: session.paused ? "pause" : "resume" });
+    void sendSessionControl(session, { type: session.paused ? "pause" : "resume" }).catch(() => undefined);
     updateTransfer(id, { status: session.paused ? "paused" : "transferring" });
     if (!session.paused) notifyFlow(session);
-  }, [notifyFlow, updateTransfer]);
+  }, [notifyFlow, sendSessionControl, updateTransfer]);
 
   return {
     transfers,
-    relayAvailable,
+    relayAvailable: true,
     notice,
     setNotice,
     sendFiles,

@@ -2,15 +2,25 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useFileTransfer } from "./hooks/useFileTransfer";
 import { useRoom } from "./hooks/useRoom";
 import {
-  clearSessionHash,
-  formatSessionCode,
+  approvePairing,
+  createPairing,
+  createPairingIdentity,
+  joinPairing,
+  listPairingRequests,
+  openPairingSession,
+  pairingRequestStatus,
+  rejectPairing,
+  sealPairingSession,
+  type CreatedPairing,
+  type JoinedPairing,
+  type PairingIdentity,
+  type PendingPairingRequest,
+} from "./lib/pairing";
+import {
   generatePin,
   generateSessionCode,
-  isValidPin,
-  isValidSessionCode,
-  normalizePin,
-  readSessionFromHash,
-  writeSessionToHash,
+  isValidPairingCode,
+  normalizePairingCode,
 } from "./lib/session";
 import type { ConnectionStatus, TransferItem } from "./types";
 
@@ -62,13 +72,30 @@ function FileIcon() {
   return <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 2.5h6l4 4v11H5z" /><path d="M11 2.5v4h4" /></svg>;
 }
 
+interface HostPairingState {
+  identity: PairingIdentity;
+  pairing: CreatedPairing;
+  session: SessionState;
+  deviceName: string;
+}
+
+interface JoinPairingState {
+  identity: PairingIdentity;
+  pairing: JoinedPairing;
+  deviceName: string;
+  code: string;
+}
+
 function Onboarding({ onEnter }: { onEnter: (session: SessionState, deviceName: string) => void }) {
-  const hashSession = useMemo(readSessionFromHash, []);
-  const [mode, setMode] = useState<"choice" | "join">(hashSession ? "join" : "choice");
-  const [sessionCode, setSessionCode] = useState(hashSession);
-  const [pin, setPin] = useState("");
+  const [mode, setMode] = useState<"choice" | "join" | "host" | "joining">("choice");
+  const [pairingCode, setPairingCode] = useState("");
   const [deviceName, setDeviceName] = useState(getDeviceName);
+  const [hostState, setHostState] = useState<HostPairingState | null>(null);
+  const [joinState, setJoinState] = useState<JoinPairingState | null>(null);
+  const [pendingRequest, setPendingRequest] = useState<PendingPairingRequest | null>(null);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
 
   const persistDeviceName = () => {
     const clean = deviceName.trim() || "My computer";
@@ -76,33 +103,202 @@ function Onboarding({ onEnter }: { onEnter: (session: SessionState, deviceName: 
     return clean;
   };
 
-  const createSession = () => {
-    const code = generateSessionCode();
-    const generatedPin = generatePin();
-    writeSessionToHash(code);
-    onEnter({ code, pin: generatedPin, createdHere: true }, persistDeviceName());
+  const backToChoice = () => {
+    setMode("choice");
+    setHostState(null);
+    setJoinState(null);
+    setPendingRequest(null);
+    setPairingCode("");
+    setError("");
+    setBusy(false);
   };
 
-  const joinSession = (event: React.FormEvent) => {
+  const startPairing = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const name = persistDeviceName();
+      const identity = await createPairingIdentity();
+      const pairing = await createPairing(getClientId(), name, identity.publicKey);
+      setHostState({
+        identity,
+        pairing,
+        session: {
+          code: generateSessionCode(),
+          pin: generatePin(),
+          createdHere: true,
+        },
+        deviceName: name,
+      });
+      setMode("host");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not start pairing");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const requestToJoin = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!isValidSessionCode(sessionCode)) {
-      setError("Enter the 12-character session code.");
+    if (!isValidPairingCode(pairingCode)) {
+      setError("Enter the 5-digit code shown on the other computer.");
       return;
     }
-    if (!isValidPin(pin)) {
-      setError("Enter the 5-digit PIN.");
-      return;
+    setBusy(true);
+    setError("");
+    try {
+      const name = persistDeviceName();
+      const identity = await createPairingIdentity();
+      const pairing = await joinPairing(
+        pairingCode,
+        getClientId(),
+        name,
+        identity.publicKey,
+      );
+      setJoinState({ identity, pairing, deviceName: name, code: pairingCode });
+      setMode("joining");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not request connection");
+    } finally {
+      setBusy(false);
     }
-    const formatted = formatSessionCode(sessionCode);
-    writeSessionToHash(formatted);
-    onEnter({ code: formatted, pin, createdHere: false }, persistDeviceName());
+  };
+
+  useEffect(() => {
+    if (mode !== "host" || !hostState) return;
+    let stopped = false;
+    let timer = 0;
+    const poll = async () => {
+      try {
+        const requests = await listPairingRequests(
+          hostState.pairing.pairingId,
+          hostState.pairing.hostToken,
+        );
+        if (!stopped) {
+          setPendingRequest(requests[0] ?? null);
+          timer = window.setTimeout(poll, 1_200);
+        }
+      } catch (cause) {
+        if (!stopped) {
+          const message = cause instanceof Error ? cause.message : "Pairing stopped";
+          if (/expired/i.test(message)) backToChoice();
+          setError(message);
+          timer = window.setTimeout(poll, 2_500);
+        }
+      }
+    };
+    void poll();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [hostState, mode]);
+
+  useEffect(() => {
+    if (mode !== "joining" || !joinState) return;
+    let stopped = false;
+    let completed = false;
+    let timer = 0;
+    const poll = async () => {
+      try {
+        const result = await pairingRequestStatus(
+          joinState.pairing.pairingId,
+          joinState.pairing.requestId,
+          joinState.pairing.joinToken,
+        );
+        if (stopped || completed) return;
+        if (result.status === "approved" && result.envelope) {
+          completed = true;
+          const session = await openPairingSession(
+            joinState.identity.keyPair.privateKey,
+            joinState.pairing.hostPublicKey,
+            joinState.pairing.requestId,
+            result.envelope,
+          );
+          if (!stopped) onEnter({ ...session, createdHere: false }, joinState.deviceName);
+          return;
+        }
+        if (result.status === "rejected") {
+          setError("The first computer declined this request.");
+          setJoinState(null);
+          setMode("join");
+          return;
+        }
+        timer = window.setTimeout(poll, 1_100);
+      } catch (cause) {
+        if (!stopped) {
+          const message = cause instanceof Error ? cause.message : "Pairing stopped";
+          setError(message);
+          if (/expired|not found/i.test(message)) {
+            setJoinState(null);
+            setMode("join");
+          } else {
+            timer = window.setTimeout(poll, 2_500);
+          }
+        }
+      }
+    };
+    void poll();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [joinState, mode, onEnter]);
+
+  const approveRequest = async () => {
+    if (!hostState || !pendingRequest) return;
+    setBusy(true);
+    setError("");
+    try {
+      const envelope = await sealPairingSession(
+        hostState.identity.keyPair.privateKey,
+        pendingRequest.publicKey,
+        pendingRequest.requestId,
+        hostState.session,
+      );
+      await approvePairing(
+        hostState.pairing.pairingId,
+        pendingRequest.requestId,
+        hostState.pairing.hostToken,
+        envelope,
+      );
+      onEnter(hostState.session, hostState.deviceName);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not approve this computer");
+      setBusy(false);
+    }
+  };
+
+  const declineRequest = async () => {
+    if (!hostState || !pendingRequest) return;
+    setBusy(true);
+    setError("");
+    try {
+      await rejectPairing(
+        hostState.pairing.pairingId,
+        pendingRequest.requestId,
+        hostState.pairing.hostToken,
+      );
+      setPendingRequest(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not decline this request");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copyPairingCode = async () => {
+    if (!hostState) return;
+    await copyText(hostState.pairing.code);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1_400);
   };
 
   return (
     <main className="onboarding">
       <header className="onboarding-header">
         <BrandMark />
-        <div className="privacy-note"><LockIcon /> Private by design</div>
+        <div className="privacy-note"><LockIcon /> Host approval required</div>
       </header>
 
       <section className="onboarding-stage">
@@ -110,7 +306,7 @@ function Onboarding({ onEnter }: { onEnter: (session: SessionState, deviceName: 
           <p className="eyebrow">One clipboard · two machines</p>
           <h1>Move thought<br />at typing speed.</h1>
           <p className="intro-body">
-            Three live text slots and direct file transfer, joined by a temporary session only your devices can unlock.
+            Pair with five digits, approve the other computer, then type or move files without ceremony.
           </p>
           <div className="connection-sketch" aria-hidden="true">
             <span className="machine-dot"><i /></span>
@@ -120,13 +316,13 @@ function Onboarding({ onEnter }: { onEnter: (session: SessionState, deviceName: 
         </div>
 
         <div className="entry-panel">
-          {mode === "choice" ? (
+          {mode === "choice" && (
             <div className="entry-content enter-animation">
-              <span className="step-number">01 / START</span>
-              <h2>Open a private session</h2>
-              <p>A random room code and one-time 5-digit PIN are made on this device.</p>
+              <span className="step-number">PAIR / 05 DIGITS</span>
+              <h2>Connect two computers</h2>
+              <p>One short code. The other computer asks to join; you approve it here.</p>
 
-              <label className="field-label" htmlFor="device-name">This device is called</label>
+              <label className="field-label" htmlFor="device-name">This computer is called</label>
               <input
                 id="device-name"
                 className="line-input"
@@ -136,48 +332,36 @@ function Onboarding({ onEnter }: { onEnter: (session: SessionState, deviceName: 
                 autoComplete="off"
               />
 
-              <button className="primary-action" onClick={createSession}>
-                Create session <ArrowIcon />
+              {error && <p className="form-error" role="alert">{error}</p>}
+              <button className="primary-action" disabled={busy} onClick={() => void startPairing()}>
+                {busy ? "Creating code…" : "Show pairing code"} <ArrowIcon />
               </button>
-              <button className="text-action" onClick={() => setMode("join")}>
-                I have a session code
+              <button className="text-action" onClick={() => { setMode("join"); setError(""); }}>
+                Join with a 5-digit code
               </button>
             </div>
-          ) : (
-            <form className="entry-content enter-animation" onSubmit={joinSession}>
-              <button className="back-action" type="button" onClick={() => {
-                setMode("choice");
-                setError("");
-              }}>← Back</button>
-              <span className="step-number">02 / JOIN</span>
-              <h2>Unlock the shared desk</h2>
-              <p>The PIN is checked before this device receives any clipboard or file details.</p>
+          )}
 
-              <label className="field-label" htmlFor="session-code">Session code</label>
-              <input
-                id="session-code"
-                className="line-input code-input"
-                placeholder="ABCD-EFGH-JKLM"
-                value={sessionCode}
-                onChange={(event) => setSessionCode(formatSessionCode(event.target.value))}
-                autoCapitalize="characters"
-                autoComplete="off"
-                spellCheck={false}
-              />
+          {mode === "join" && (
+            <form className="entry-content enter-animation" onSubmit={requestToJoin}>
+              <button className="back-action" type="button" onClick={backToChoice}>← Back</button>
+              <span className="step-number">SECOND COMPUTER</span>
+              <h2>Enter five digits</h2>
+              <p>Use the code visible on the first computer. Nothing else to type.</p>
 
-              <label className="field-label" htmlFor="session-pin">5-digit PIN</label>
+              <label className="field-label" htmlFor="pairing-code">Pairing code</label>
               <input
-                id="session-pin"
-                className="line-input pin-input"
-                placeholder="•••••"
-                value={pin}
-                onChange={(event) => setPin(normalizePin(event.target.value))}
+                id="pairing-code"
+                className="line-input pairing-code-input"
+                placeholder="00000"
+                value={pairingCode}
+                onChange={(event) => setPairingCode(normalizePairingCode(event.target.value))}
                 inputMode="numeric"
                 autoComplete="one-time-code"
-                type="password"
+                autoFocus
               />
 
-              <label className="field-label" htmlFor="join-device-name">This device is called</label>
+              <label className="field-label" htmlFor="join-device-name">This computer is called</label>
               <input
                 id="join-device-name"
                 className="line-input"
@@ -188,15 +372,60 @@ function Onboarding({ onEnter }: { onEnter: (session: SessionState, deviceName: 
               />
 
               {error && <p className="form-error" role="alert">{error}</p>}
-              <button className="primary-action" type="submit">
-                Join session <ArrowIcon />
+              <button className="primary-action" disabled={busy} type="submit">
+                {busy ? "Sending request…" : "Request connection"} <ArrowIcon />
               </button>
             </form>
           )}
 
+          {mode === "host" && hostState && (
+            <div className="entry-content enter-animation pairing-stage">
+              <button className="back-action" type="button" onClick={backToChoice}>← Cancel</button>
+              <span className="step-number">FIRST COMPUTER</span>
+              <h2>Type this there</h2>
+              <div className="pairing-code-display" aria-label={`Pairing code ${hostState.pairing.code}`}>
+                {[...hostState.pairing.code].map((digit, index) => <span key={`${digit}-${index}`}>{digit}</span>)}
+              </div>
+              <button className="copy-pairing-code" onClick={() => void copyPairingCode()}>
+                {copied ? "Copied" : "Copy code"}
+              </button>
+
+              {pendingRequest ? (
+                <div className="approval-request">
+                  <span>CONNECTION REQUEST</span>
+                  <strong>{pendingRequest.deviceName}</strong>
+                  <p>Approve only if this is the computer beside you.</p>
+                  <div>
+                    <button disabled={busy} className="approve-button" onClick={() => void approveRequest()}>
+                      {busy ? "Approving…" : "Approve"}
+                    </button>
+                    <button disabled={busy} onClick={() => void declineRequest()}>Not mine</button>
+                  </div>
+                </div>
+              ) : (
+                <div className="pairing-wait"><i /><span>Waiting for the second computer…</span></div>
+              )}
+              {error && <p className="form-error" role="alert">{error}</p>}
+            </div>
+          )}
+
+          {mode === "joining" && joinState && (
+            <div className="entry-content enter-animation pairing-stage">
+              <button className="back-action" type="button" onClick={backToChoice}>← Cancel</button>
+              <span className="step-number">REQUEST SENT</span>
+              <h2>Approve this computer</h2>
+              <div className="pairing-code-display compact" aria-label={`Pairing code ${joinState.code}`}>
+                {[...joinState.code].map((digit, index) => <span key={`${digit}-${index}`}>{digit}</span>)}
+              </div>
+              <p>On {joinState.pairing.hostName}, press Approve. This page will connect automatically.</p>
+              <div className="pairing-wait"><i /><span>Waiting for approval…</span></div>
+              {error && <p className="form-error" role="alert">{error}</p>}
+            </div>
+          )}
+
           <footer className="entry-footer">
-            <span>PIN stays on your devices</span>
-            <span>Rooms expire after 24h</span>
+            <span>1 code · 1 approval</span>
+            <span>Pairing expires in 10 min</span>
           </footer>
         </div>
       </section>
@@ -238,51 +467,27 @@ function ConnectionBadge({ status, peerCount }: { status: ConnectionStatus; peer
 }
 
 function SessionSheet({
-  session,
   onClose,
 }: {
-  session: SessionState;
   onClose: () => void;
 }) {
-  const [showPin, setShowPin] = useState(session.createdHere);
-  const [copied, setCopied] = useState("");
-  const inviteUrl = window.location.href;
-
-  const copy = async (label: string, value: string) => {
-    await copyText(value);
-    setCopied(label);
-    window.setTimeout(() => setCopied(""), 1600);
-  };
-
   return (
     <div className="sheet-backdrop" onMouseDown={onClose}>
       <section className="session-sheet" onMouseDown={(event) => event.stopPropagation()} aria-modal="true" role="dialog">
         <button className="sheet-close" onClick={onClose} aria-label="Close">×</button>
         <span className="step-number">PRIVATE SESSION</span>
-        <h2>Connect the other machine</h2>
-        <p>Open CopyPaesto there and enter these two values. The invite link carries the session code, never the PIN.</p>
+        <h2>Your computers are paired</h2>
+        <p>The five-digit code has done its job. The private room credentials stay hidden in browser memory.</p>
 
-        <div className="credential-row">
-          <div>
-            <span>Session code</span>
-            <strong>{session.code}</strong>
-          </div>
-          <button onClick={() => void copy("code", session.code)}>{copied === "code" ? "Copied" : "Copy"}</button>
+        <div className="session-fact">
+          <LockIcon />
+          <div><strong>End-to-end encrypted</strong><span>Clipboard content is encrypted before it reaches the relay.</span></div>
         </div>
-
-        <div className="credential-row pin-row">
-          <div>
-            <span>5-digit PIN</span>
-            <strong>{showPin ? session.pin : "•••••"}</strong>
-          </div>
-          <button onClick={() => setShowPin((visible) => !visible)}>{showPin ? "Hide" : "Show"}</button>
-          <button onClick={() => void copy("pin", session.pin)}>{copied === "pin" ? "Copied" : "Copy"}</button>
+        <div className="session-fact">
+          <span className="session-fact-number">24h</span>
+          <div><strong>Temporary by default</strong><span>The room and its encrypted state expire automatically.</span></div>
         </div>
-
-        <button className="secondary-action wide" onClick={() => void copy("link", inviteUrl)}>
-          <CopyIcon /> {copied === "link" ? "Invite link copied" : "Copy invite link"}
-        </button>
-        <div className="security-caption"><LockIcon /> PIN is held in memory only and disappears when you leave or refresh.</div>
+        <div className="security-caption">To pair a different computer, leave this room and create a fresh five-digit code.</div>
       </section>
     </div>
   );
@@ -337,11 +542,14 @@ function Workspace({ session, deviceName, onLeave }: {
   });
   const files = useFileTransfer({
     peers: room.peers,
+    turnAccess: room.turnAccess,
     sendSignal: room.sendSignal,
     subscribeToSignals: room.subscribeToSignals,
+    sendRelayFile: room.sendRelayFile,
+    subscribeToRelayFiles: room.subscribeToRelayFiles,
   });
   const [activeSlot, setActiveSlot] = useState(0);
-  const [showSession, setShowSession] = useState(session.createdHere);
+  const [showSession, setShowSession] = useState(false);
   const [copied, setCopied] = useState(false);
   const [dragging, setDragging] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -380,7 +588,7 @@ function Workspace({ session, deviceName, onLeave }: {
       <main className="session-denied">
         <BrandMark />
         <div><LockIcon /></div>
-        <h1>That PIN didn’t unlock this session.</h1>
+        <h1>This private room could not be opened.</h1>
         <p>No clipboard text or device information was shared.</p>
         <button className="primary-action" onClick={onLeave}>Try again <ArrowIcon /></button>
       </main>
@@ -396,7 +604,7 @@ function Workspace({ session, deviceName, onLeave }: {
           <span className="status-detail">{room.statusDetail}</span>
         </div>
         <div className="header-actions">
-          <button className="session-button" onClick={() => setShowSession(true)}><LockIcon /> Session</button>
+          <button className="session-button" onClick={() => setShowSession(true)}><LockIcon /> Private</button>
           <button className="leave-button" onClick={onLeave}>Leave</button>
         </div>
       </header>
@@ -511,7 +719,7 @@ function Workspace({ session, deviceName, onLeave }: {
         </aside>
       </div>
 
-      {showSession && <SessionSheet session={session} onClose={() => setShowSession(false)} />}
+      {showSession && <SessionSheet onClose={() => setShowSession(false)} />}
     </main>
   );
 }
@@ -520,21 +728,12 @@ export default function App() {
   const [session, setSession] = useState<SessionState | null>(null);
   const [deviceName, setDeviceName] = useState(getDeviceName);
 
-  useEffect(() => {
-    const handleHashChange = () => {
-      if (!window.location.hash && session) setSession(null);
-    };
-    window.addEventListener("hashchange", handleHashChange);
-    return () => window.removeEventListener("hashchange", handleHashChange);
-  }, [session]);
-
   const enter = (next: SessionState, name: string) => {
     setDeviceName(name);
     setSession(next);
   };
 
   const leave = () => {
-    clearSessionHash();
     setSession(null);
   };
 

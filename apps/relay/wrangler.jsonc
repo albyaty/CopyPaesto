@@ -8,6 +8,10 @@
       {
         "name": "ROOMS",
         "class_name": "ClipboardRoom"
+      },
+      {
+        "name": "PAIRINGS",
+        "class_name": "PairingDirectory"
       }
     ]
   },
@@ -15,6 +19,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["ClipboardRoom"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["PairingDirectory"]
     }
   ],
   "observability": {

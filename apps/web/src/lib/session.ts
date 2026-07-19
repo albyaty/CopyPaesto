@@ -46,6 +46,14 @@ export function isValidPin(value: string) {
   return /^\d{5}$/.test(value);
 }
 
+export function normalizePairingCode(value: string) {
+  return value.replace(/\D/g, "").slice(0, 5);
+}
+
+export function isValidPairingCode(value: string) {
+  return /^\d{5}$/.test(value);
+}
+
 export function readSessionFromHash() {
   const params = new URLSearchParams(window.location.hash.replace(/^#/, ""));
   const value = params.get("session") ?? "";
