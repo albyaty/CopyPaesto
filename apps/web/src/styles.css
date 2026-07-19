@@ -1401,6 +1401,22 @@ svg {
   opacity: 0.45;
 }
 
+.forget-session-button {
+  width: 100%;
+  min-height: 42px;
+  margin-top: 10px;
+  border: 1px solid rgba(250, 249, 245, 0.25);
+  color: rgba(250, 249, 245, 0.72);
+  background: transparent;
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.forget-session-button:hover {
+  border-color: rgba(250, 249, 245, 0.55);
+  color: var(--white);
+}
+
 .add-device-sheet .pairing-code-display {
   margin-top: 4px;
 }

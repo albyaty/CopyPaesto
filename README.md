@@ -10,6 +10,7 @@ The interface is published on GitHub Pages. A Cloudflare Worker and two SQLite-b
 ## Current MVP
 
 - Pair devices with a random 5-digit invitation and an approval on an already-connected device.
+- After approval, that browser profile remembers the room across closed tabs and browser or device restarts until **Leave** is confirmed.
 - Keep up to eight devices in one live room; clipboard changes reach all of them and files can target one device or every other connected device.
 - The high-entropy room identifier and encryption secret never appear in the interface.
 - Pairing codes expire after 10 minutes and join attempts are rate-limited.
@@ -21,7 +22,7 @@ The interface is published on GitHub Pages. A Cloudflare Worker and two SQLite-b
 - An **All devices** send creates an independent transfer for each recipient, so everyone gets Save/Decline and one slow device cannot block the others.
 - Direct transfers use 32 KiB data-channel chunks. Both fallback modes use 512 KiB binary WebSocket frames, pause/resume, and a bounded 32 MiB relay window.
 - Chrome and Edge stream incoming large files directly to disk. A trusted device can authorize one auto-save folder and receive later files there without clicking Save.
-- Rooms delete their encrypted state after 24 hours.
+- Rooms delete their encrypted relay state after 24 hours. A remembered browser can reconnect to the same empty room without pairing again.
 
 ## Architecture
 
@@ -65,7 +66,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173` in two or more browser profiles/windows. Each tab receives a distinct session-only device identity, so the multi-device flow can be tested on one machine.
+Open `http://localhost:5173` in two or more browser profiles or isolated browser contexts. Each tab receives a transient connection identity, while an approved browser profile remembers its room until **Leave**; use separate profiles when testing multiple devices on one machine.
 
 Useful commands:
 
