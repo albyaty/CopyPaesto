@@ -34,7 +34,7 @@ interface UseRoomOptions {
 
 export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptions) {
   const [status, setStatus] = useState<ConnectionStatus>("deriving");
-  const [statusDetail, setStatusDetail] = useState("Preparing your private session…");
+  const [statusDetail, setStatusDetail] = useState("Preparing your secure session…");
   const [slots, setSlots] = useState<ClipboardSlot[]>(emptySlots);
   const [peers, setPeers] = useState<Peer[]>([]);
   const [lastSyncedAt, setLastSyncedAt] = useState(0);
@@ -101,7 +101,7 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
         reconnectAttempt = 0;
         setTurnAccess(turnAccessRef.current);
         setStatus("connected");
-        setStatusDetail("Private session connected");
+        setStatusDetail("Secure session connected");
         for (const [slot, text] of pendingSlotsRef.current) flushSlot(slot, text);
         return;
       }

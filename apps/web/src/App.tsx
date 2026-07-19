@@ -24,7 +24,7 @@ import {
   isValidPairingCode,
   normalizePairingCode,
 } from "./lib/session";
-import type { ConnectionStatus, Peer, RelayChunkProtection, TransferItem } from "./types";
+import type { ConnectionStatus, Peer, TransferItem } from "./types";
 
 interface SessionState {
   code: string;
@@ -305,7 +305,7 @@ function Onboarding({ onEnter }: { onEnter: (session: SessionState, deviceName: 
 
       <section className="onboarding-stage">
         <div className="intro-copy">
-          <p className="eyebrow">One clipboard · two machines</p>
+          <p className="eyebrow">One clipboard · every machine</p>
           <h1>Move thought<br />at typing speed.</h1>
           <p className="intro-body">
             Pair with five digits, approve each device, then type or move files without ceremony.
@@ -445,14 +445,16 @@ function formatBytes(bytes: number) {
 
 function transferLabel(item: TransferItem) {
   const labels: Record<TransferItem["status"], string> = {
-    connecting: "Making a direct route…",
-    offered: "Ready to receive",
-    waiting: "Waiting for acceptance",
-    transferring: item.direction === "send" ? "Sending" : "Receiving",
-    paused: "Paused",
-    finishing: "Finishing safely…",
-    complete: "Complete",
-    declined: "Declined",
+    connecting: `Connecting to ${item.peerName}…`,
+    offered: `From ${item.peerName} · ready to receive`,
+    waiting: `Waiting for ${item.peerName}`,
+    transferring: item.direction === "send"
+      ? `Sending to ${item.peerName}`
+      : `Receiving from ${item.peerName}`,
+    paused: `Paused with ${item.peerName}`,
+    finishing: `Finishing with ${item.peerName}…`,
+    complete: `Complete with ${item.peerName}`,
+    declined: item.direction === "send" ? `${item.peerName} declined` : "Declined",
     failed: "Transfer stopped",
   };
   return labels[item.status];
@@ -489,9 +491,9 @@ function SessionSheet({
     <div className="sheet-backdrop" onMouseDown={onClose}>
       <section className="session-sheet" onMouseDown={(event) => event.stopPropagation()} aria-modal="true" role="dialog">
         <button className="sheet-close" onClick={onClose} aria-label="Close">×</button>
-        <span className="step-number">PRIVATE SESSION</span>
+        <span className="step-number">SECURE SESSION</span>
         <h2>{devices.length} {devices.length === 1 ? "device" : "devices"} in this room</h2>
-        <p>Clipboard changes reach every connected device. File transfers go only to the recipient you choose.</p>
+        <p>Clipboard changes reach every connected device. Send a file to one device or everyone at once.</p>
 
         <div className="session-device-list" aria-label="Connected devices">
           {devices.map((device) => (
@@ -540,7 +542,7 @@ function TransferRow({
   const route = item.relayProtection === "transport"
     ? "Turbo relay"
     : item.relayProtection === "e2e"
-      ? "Private relay"
+      ? "Encrypted relay"
       : "Direct";
   return (
     <div className={`transfer-row transfer-${item.status}`}>
@@ -591,27 +593,26 @@ function Workspace({ session, deviceName, onLeave }: {
   const [activeSlot, setActiveSlot] = useState(0);
   const [showSession, setShowSession] = useState(false);
   const [showAddDevice, setShowAddDevice] = useState(false);
-  const [selectedPeerId, setSelectedPeerId] = useState("");
-  const [relayProtection, setRelayProtection] = useState<RelayChunkProtection>(() => (
-    localStorage.getItem("copypaesto:file-relay-protection") === "transport" ? "transport" : "e2e"
-  ));
+  const [recipientTarget, setRecipientTarget] = useState<"all" | string>("all");
   const [copied, setCopied] = useState(false);
   const [dragging, setDragging] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const active = room.slots[activeSlot];
-  const selectedPeer = room.peers.find((peer) => peer.id === selectedPeerId) ?? null;
+  const selectedPeers = recipientTarget === "all"
+    ? room.peers
+    : room.peers.filter((peer) => peer.id === recipientTarget);
+  const recipientSummary = recipientTarget === "all"
+    ? room.peers.length === 1
+      ? room.peers[0]?.name ?? "another device"
+      : `${room.peers.length} connected devices`
+    : selectedPeers[0]?.name ?? "another device";
   const canAddDevice = room.peers.length < 7;
 
   useEffect(() => {
-    setSelectedPeerId((current) => room.peers.some((peer) => peer.id === current)
-      ? current
-      : room.peers[0]?.id ?? "");
-  }, [room.peers]);
-
-  const chooseRelayProtection = (next: RelayChunkProtection) => {
-    setRelayProtection(next);
-    localStorage.setItem("copypaesto:file-relay-protection", next);
-  };
+    if (recipientTarget !== "all" && !room.peers.some((peer) => peer.id === recipientTarget)) {
+      setRecipientTarget("all");
+    }
+  }, [recipientTarget, room.peers]);
 
   const copyActive = async () => {
     await copyText(active.text);
@@ -630,8 +631,8 @@ function Workspace({ session, deviceName, onLeave }: {
 
   const offerFiles = (list: FileList | File[]) => {
     const selected = Array.from(list);
-    if (selected.length && selectedPeer) {
-      void files.sendFiles(selected, selectedPeer.id, relayProtection);
+    if (selected.length && selectedPeers.length) {
+      void Promise.all(selectedPeers.map((peer) => files.sendFiles(selected, peer.id, "transport")));
     } else if (selected.length) {
       files.setNotice("Choose a connected device before sending a file.");
     }
@@ -650,7 +651,7 @@ function Workspace({ session, deviceName, onLeave }: {
       <main className="session-denied">
         <BrandMark />
         <div><LockIcon /></div>
-        <h1>This private room could not be opened.</h1>
+        <h1>This secure room could not be opened.</h1>
         <p>No clipboard text or device information was shared.</p>
         <button className="primary-action" onClick={onLeave}>Try again <ArrowIcon /></button>
       </main>
@@ -671,7 +672,7 @@ function Workspace({ session, deviceName, onLeave }: {
             disabled={!canAddDevice}
             onClick={() => setShowAddDevice(true)}
           >+ Device</button>
-          <button className="session-button" onClick={() => setShowSession(true)}><LockIcon /> Private</button>
+          <button className="session-button" onClick={() => setShowSession(true)}><LockIcon /> Session</button>
           <button className="leave-button" onClick={onLeave}>Leave</button>
         </div>
       </header>
@@ -733,18 +734,30 @@ function Workspace({ session, deviceName, onLeave }: {
               <span>DIRECT TRANSFER</span>
               <h2>Files</h2>
             </div>
-            <span className="route-label">Direct first · {relayProtection === "transport" ? "Turbo" : "Private"} fallback</span>
+            <span className="route-label">Direct first · Turbo fallback</span>
           </div>
 
           <div className="file-routing-controls">
             <div className="recipient-picker">
               <span>SEND TO</span>
-              <div>
+              <div role="radiogroup" aria-label="File recipients">
+                {room.peers.length > 1 && (
+                  <button
+                    className={`all-devices ${recipientTarget === "all" ? "selected" : ""}`}
+                    role="radio"
+                    aria-checked={recipientTarget === "all"}
+                    onClick={() => setRecipientTarget("all")}
+                  >
+                    <i />All devices ({room.peers.length})
+                  </button>
+                )}
                 {room.peers.length ? room.peers.map((peer) => (
                   <button
                     key={peer.id}
-                    className={selectedPeerId === peer.id ? "selected" : ""}
-                    onClick={() => setSelectedPeerId(peer.id)}
+                    className={recipientTarget === peer.id || (recipientTarget === "all" && room.peers.length === 1) ? "selected" : ""}
+                    role="radio"
+                    aria-checked={recipientTarget === peer.id || (recipientTarget === "all" && room.peers.length === 1)}
+                    onClick={() => setRecipientTarget(peer.id)}
                   >
                     <i />{peer.name}
                   </button>
@@ -752,23 +765,12 @@ function Workspace({ session, deviceName, onLeave }: {
               </div>
             </div>
 
-            <div className={`relay-mode ${relayProtection === "transport" ? "is-turbo" : ""}`}>
+            <div className="relay-mode is-turbo">
               <div className="relay-mode-heading">
-                <span>IF DIRECT IS BLOCKED</span>
-                <div role="group" aria-label="File relay protection">
-                  <button
-                    className={relayProtection === "e2e" ? "selected" : ""}
-                    onClick={() => chooseRelayProtection("e2e")}
-                  >Private</button>
-                  <button
-                    className={relayProtection === "transport" ? "selected" : ""}
-                    onClick={() => chooseRelayProtection("transport")}
-                  >Turbo</button>
-                </div>
+                <span>TURBO FALLBACK</span>
+                <strong>AUTOMATIC</strong>
               </div>
-              <small>{relayProtection === "transport"
-                ? "Faster bulk transfer. File bytes use TLS, so Cloudflare or a work TLS proxy could inspect them."
-                : "File bytes remain end-to-end encrypted through the relay."}</small>
+              <small>When direct is blocked, bulk file bytes use TLS for speed. Cloudflare or a work TLS proxy could inspect them.</small>
             </div>
           </div>
 
@@ -786,7 +788,7 @@ function Workspace({ session, deviceName, onLeave }: {
           >
             <span className="drop-arrow">↗</span>
             <strong>Drop anything</strong>
-            <small>{selectedPeer ? `Send to ${selectedPeer.name}` : "Waiting for another device"}</small>
+            <small>{selectedPeers.length ? `Send to ${recipientSummary}` : "Waiting for another device"}</small>
           </button>
           <input
             ref={fileInput}

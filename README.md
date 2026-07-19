@@ -10,14 +10,15 @@ The interface is published on GitHub Pages. A Cloudflare Worker and two SQLite-b
 ## Current MVP
 
 - Pair devices with a random 5-digit invitation and an approval on an already-connected device.
-- Keep up to eight devices in one live room; clipboard changes reach all of them and file sends have an explicit recipient.
+- Keep up to eight devices in one live room; clipboard changes reach all of them and files can target one device or every other connected device.
 - The high-entropy room identifier and encryption secret never appear in the interface.
 - Pairing codes expire after 10 minutes and join attempts are rate-limited.
 - The private room credentials are handed to the approved computer through an ephemeral ECDH-encrypted exchange.
 - Three text slots update as you type.
 - Clipboard payloads, signaling, file names, and transfer controls are always AES-GCM encrypted in the browser.
 - Files try a direct WebRTC data channel first, then automatically switch to a Worker relay when the networks cannot connect directly.
-- The fallback can use **Private** end-to-end encrypted chunks or explicit **Turbo** chunks protected only by WSS/TLS for higher throughput.
+- If direct WebRTC is blocked, files automatically use the faster **Turbo** fallback protected by WSS/TLS.
+- An **All devices** send creates an independent transfer for each recipient, so everyone gets Save/Decline and one slow device cannot block the others.
 - Direct transfers use 32 KiB data-channel chunks. Both fallback modes use 512 KiB binary WebSocket frames, pause/resume, and a bounded 32 MiB relay window.
 - Chrome and Edge stream incoming large files directly to disk. A trusted device can authorize one auto-save folder and receive later files there without clicking Save.
 - Rooms delete their encrypted state after 24 hours.
@@ -31,12 +32,10 @@ GitHub Pages
        ├─ encrypted clipboard + signaling ── Cloudflare ClipboardRoom
        └─ file transfer
             ├─ preferred: direct WebRTC
-            └─ fallback through ClipboardRoom
-                 ├─ Private: E2E-encrypted WebSocket chunks
-                 └─ Turbo: TLS-protected WebSocket chunks
+            └─ fallback: TLS-protected Turbo chunks through ClipboardRoom
 ```
 
-The relay cannot read clipboard text, room secrets, file names, or transfer controls. In Private mode it also cannot read file bytes. Turbo intentionally lets the Worker see bulk file bytes to avoid browser encryption overhead; a corporate TLS-inspecting proxy may see them too.
+The relay cannot read clipboard text, room secrets, file names, or transfer controls. Turbo intentionally lets the Worker see bulk file bytes to avoid browser encryption overhead; a corporate TLS-inspecting proxy may see them too. The older end-to-end encrypted chunk protocol remains supported invisibly so open tabs from an earlier release still work during upgrades.
 
 ## Handling a 1 GB file
 
@@ -47,9 +46,11 @@ The route is selected automatically:
 1. WebRTC attempts a direct connection.
 2. If it has not connected within 12 seconds, CopyPaesto closes that attempt.
 3. The transfer is offered again over the authenticated Worker WebSocket.
-4. File names and every fallback control message remain end-to-end encrypted. Binary chunks use the selected Private or Turbo protection, and file bytes are never converted to Base64.
+4. File names and every fallback control message remain end-to-end encrypted. Bulk binary chunks use Turbo transport protection and are never converted to Base64.
 
 The sending and receiving devices must remain online until the transfer completes. Chrome or Edge is recommended for files over 128 MB because other browsers may not expose the streaming file-save API. Without that API, the memory-backed fallback is limited to 128 MB.
+
+Sending to all devices opens a separate direct or Turbo route to each recipient. Transfers run in parallel for responsiveness and failure isolation, which means the sender uploads one copy per receiving device.
 
 Trusted auto-save still requires one deliberate browser action: choose a destination folder and grant write permission on each receiving device. CopyPaesto stores the folder handle in that browser. If the browser drops permission after a restart, click **Turn on** once to reconnect it. Incoming name collisions receive a numbered name instead of overwriting an existing file.
 
@@ -78,7 +79,7 @@ npm run dev:web
 npm run dev:relay
 ```
 
-`npm run test:protocol` verifies Private AES-GCM integrity and Turbo frame parsing. `npm run test:relay` covers multiple devices joining through short-code approval, ECDH credential handoff, room authentication, three-device clipboard routing, signaling, and Private/Turbo binary file routing. `npm run benchmark:relay` measures the production 512 KiB path; set `BENCHMARK_PROTECTION=e2e` or `BENCHMARK_PROTECTION=transport` to compare Private and Turbo.
+`npm run test:protocol` verifies legacy AES-GCM integrity and Turbo frame parsing. `npm run test:relay` covers multiple devices joining through short-code approval, ECDH credential handoff, room authentication, three-device clipboard routing, signaling, and both binary protocol versions. `npm run benchmark:relay` measures the production 512 KiB path; set `BENCHMARK_PROTECTION=e2e` or `BENCHMARK_PROTECTION=transport` to compare encryption overhead with Turbo.
 
 ## Deploy the relay
 
