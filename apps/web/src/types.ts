@@ -27,12 +27,25 @@ export type SignalPayload =
   | { kind: "answer"; transferId: string; description: RTCSessionDescriptionInit }
   | { kind: "ice"; transferId: string; candidate: RTCIceCandidateInit };
 
+export type RelayFilePayload =
+  | { kind: "offer"; transferId: string; name: string; size: number; mime: string; lastModified: number }
+  | { kind: "accept"; transferId: string }
+  | { kind: "decline"; transferId: string }
+  | { kind: "chunk"; transferId: string; offset: number; data: string }
+  | { kind: "ack"; transferId: string; received: number }
+  | { kind: "pause"; transferId: string }
+  | { kind: "resume"; transferId: string }
+  | { kind: "eof"; transferId: string }
+  | { kind: "complete"; transferId: string }
+  | { kind: "error"; transferId: string; message: string };
+
 export type ServerMessage =
   | { type: "authenticated" }
   | { type: "snapshot"; slots: StoredSlot[] }
   | ({ type: "slot:update" } & StoredSlot)
   | { type: "presence"; peers: Peer[] }
   | { type: "signal"; from: string; envelope: CipherEnvelope }
+  | { type: "file:relay"; from: string; envelope: CipherEnvelope }
   | { type: "pong"; at: number }
   | { type: "error"; message: string };
 

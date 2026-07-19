@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { decryptValue, deriveSessionCredentials, encryptValue } from "../lib/crypto";
-import { RoomRelay } from "../lib/relay";
+import { RoomRelay, type TurnAccess } from "../lib/relay";
 import { normalizeSessionCode } from "../lib/session";
 import type {
   ConnectionStatus,
   Peer,
+  RelayFilePayload,
   ServerMessage,
   SignalPayload,
   SlotPayload,
@@ -35,13 +36,18 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
   const [slots, setSlots] = useState<ClipboardSlot[]>(emptySlots);
   const [peers, setPeers] = useState<Peer[]>([]);
   const [lastSyncedAt, setLastSyncedAt] = useState(0);
+  const [turnAccess, setTurnAccess] = useState<TurnAccess | null>(null);
   const relayRef = useRef<RoomRelay | null>(null);
   const keyRef = useRef<CryptoKey | null>(null);
+  const turnAccessRef = useRef<TurnAccess | null>(null);
   const pendingSlotsRef = useRef(new Map<number, string>());
   const timersRef = useRef(new Map<number, number>());
   const sendChainsRef = useRef([Promise.resolve(), Promise.resolve(), Promise.resolve()]);
   const signalChainRef = useRef(Promise.resolve());
   const signalListenersRef = useRef(new Set<(from: string, signal: SignalPayload) => void>());
+  const relayFileSendChainsRef = useRef(new Map<string, Promise<void>>());
+  const relayFileReceiveChainRef = useRef(Promise.resolve());
+  const relayFileListenersRef = useRef(new Set<(from: string, payload: RelayFilePayload) => void>());
   const readyRef = useRef(false);
 
   const flushSlot = useCallback((slot: number, text: string) => {
@@ -71,7 +77,9 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
     setStatusDetail("Deriving session keys locally…");
     setPeers([]);
     setSlots(emptySlots);
+    setTurnAccess(null);
     keyRef.current = null;
+    turnAccessRef.current = null;
     readyRef.current = false;
 
     const handleMessage = async (message: ServerMessage) => {
@@ -81,6 +89,7 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
       if (message.type === "authenticated") {
         readyRef.current = true;
         reconnectAttempt = 0;
+        setTurnAccess(turnAccessRef.current);
         setStatus("connected");
         setStatusDetail("Private session connected");
         for (const [slot, text] of pendingSlotsRef.current) flushSlot(slot, text);
@@ -121,8 +130,20 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
           message.envelope,
           `slot:${message.slot}:v1`,
         );
-        if (payload.authorId === clientId && pendingSlotsRef.current.get(message.slot) === payload.text) {
-          pendingSlotsRef.current.delete(message.slot);
+        if (payload.authorId === clientId) {
+          const pendingText = pendingSlotsRef.current.get(message.slot);
+          if (pendingText === payload.text) pendingSlotsRef.current.delete(message.slot);
+
+          // An echoed update can arrive after the user has already typed more.
+          // Keep the local text authoritative and only advance its server sequence.
+          setSlots((current) => {
+            if (message.sequence <= current[message.slot].sequence) return current;
+            const next = [...current];
+            next[message.slot] = { ...current[message.slot], sequence: message.sequence };
+            return next;
+          });
+          setLastSyncedAt(Date.now());
+          return;
         }
         setSlots((current) => {
           if (message.sequence <= current[message.slot].sequence) return current;
@@ -140,6 +161,12 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
         return;
       }
 
+      if (message.type === "file:relay") {
+        const payload = await decryptValue<RelayFilePayload>(key, message.envelope, "file-relay:v1");
+        for (const listener of relayFileListenersRef.current) listener(message.from, payload);
+        return;
+      }
+
       if (message.type === "error") setStatusDetail(message.message);
     };
 
@@ -149,6 +176,10 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
           const credentials = await deriveSessionCredentials(normalizedCode, pin);
           if (stopped) return;
           keyRef.current = credentials.encryptionKey;
+          turnAccessRef.current = {
+            roomId: credentials.roomId,
+            authVerifier: credentials.authVerifier,
+          };
           const relay = new RoomRelay({
             onOpen: () => {
               if (stopped) return;
@@ -156,9 +187,18 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
               setStatusDetail("Checking the session PIN…");
             },
             onMessage: (message) => {
-              void handleMessage(message).catch(() => {
-                setStatusDetail("A protected message could not be opened");
-              });
+              if (message.type === "file:relay") {
+                relayFileReceiveChainRef.current = relayFileReceiveChainRef.current
+                  .catch(() => undefined)
+                  .then(() => handleMessage(message))
+                  .catch(() => {
+                    setStatusDetail("A protected file chunk could not be opened");
+                  });
+              } else {
+                void handleMessage(message).catch(() => {
+                  setStatusDetail("A protected message could not be opened");
+                });
+              }
             },
             onClose: (event) => {
               readyRef.current = false;
@@ -187,6 +227,10 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
 
         const credentials = await deriveSessionCredentials(normalizedCode, pin);
         keyRef.current = credentials.encryptionKey;
+        turnAccessRef.current = {
+          roomId: credentials.roomId,
+          authVerifier: credentials.authVerifier,
+        };
         relayRef.current?.connect(credentials.roomId, clientId, credentials.authVerifier, deviceName);
       } catch {
         if (!stopped) {
@@ -205,6 +249,7 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
       relayRef.current = null;
       for (const timer of timersRef.current.values()) window.clearTimeout(timer);
       timersRef.current.clear();
+      relayFileSendChainsRef.current.clear();
     };
   }, [clientId, deviceName, flushSlot, pin, sessionCode]);
 
@@ -250,23 +295,55 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
     return () => signalListenersRef.current.delete(listener);
   }, []);
 
+  const sendRelayFile = useCallback((to: string, payload: RelayFilePayload) => {
+    const previous = relayFileSendChainsRef.current.get(payload.transferId) ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(async () => {
+        const key = keyRef.current;
+        if (!key || !readyRef.current) throw new Error("Session is not connected");
+        const envelope = await encryptValue(key, payload, "file-relay:v1");
+        if (!relayRef.current?.send({ type: "file:relay", to, envelope })) {
+          throw new Error("Session is not connected");
+        }
+      });
+    relayFileSendChainsRef.current.set(payload.transferId, next);
+    void next.finally(() => {
+      if (relayFileSendChainsRef.current.get(payload.transferId) === next) {
+        relayFileSendChainsRef.current.delete(payload.transferId);
+      }
+    }).catch(() => undefined);
+    return next;
+  }, []);
+
+  const subscribeToRelayFiles = useCallback((listener: (from: string, payload: RelayFilePayload) => void) => {
+    relayFileListenersRef.current.add(listener);
+    return () => relayFileListenersRef.current.delete(listener);
+  }, []);
+
   return useMemo(() => ({
     status,
     statusDetail,
     slots,
     peers,
+    turnAccess,
     lastSyncedAt,
     updateSlot,
     sendSignal,
     subscribeToSignals,
+    sendRelayFile,
+    subscribeToRelayFiles,
   }), [
     lastSyncedAt,
     peers,
     sendSignal,
+    sendRelayFile,
     slots,
     status,
     statusDetail,
     subscribeToSignals,
+    subscribeToRelayFiles,
+    turnAccess,
     updateSlot,
   ]);
 }
