@@ -1,23 +1,25 @@
 # CopyPaesto
 
-CopyPaesto is a private shared clipboard and large-file bridge for two computers.
+CopyPaesto is a shared clipboard and large-file bridge for up to eight trusted devices.
 
 - Live app: <https://albyaty.github.io/CopyPaesto/>
 - Relay health: <https://copypaesto-relay.albyaty.workers.dev/health>
 
-The interface is published on GitHub Pages. A Cloudflare Worker and two SQLite-backed Durable Objects handle temporary pairing, encrypted clipboard state, signaling, and the encrypted file fallback.
+The interface is published on GitHub Pages. A Cloudflare Worker and two SQLite-backed Durable Objects handle temporary pairing, encrypted clipboard state, signaling, and file fallback routing.
 
 ## Current MVP
 
-- Pair two computers with one random 5-digit code and an approval on the first computer.
+- Pair devices with a random 5-digit invitation and an approval on an already-connected device.
+- Keep up to eight devices in one live room; clipboard changes reach all of them and file sends have an explicit recipient.
 - The high-entropy room identifier and encryption secret never appear in the interface.
 - Pairing codes expire after 10 minutes and join attempts are rate-limited.
 - The private room credentials are handed to the approved computer through an ephemeral ECDH-encrypted exchange.
 - Three text slots update as you type.
-- Clipboard payloads, signaling, and relayed file chunks are AES-GCM encrypted in the browser.
-- Files try a direct WebRTC data channel first, then automatically switch to the encrypted Worker relay when the networks cannot connect directly.
-- Direct transfers use 32 KiB data-channel chunks. The fallback uses encrypted 512 KiB binary WebSocket frames, pause/resume, and a bounded 32 MiB relay window.
-- Chrome and Edge stream incoming large files directly to a user-selected destination on disk.
+- Clipboard payloads, signaling, file names, and transfer controls are always AES-GCM encrypted in the browser.
+- Files try a direct WebRTC data channel first, then automatically switch to a Worker relay when the networks cannot connect directly.
+- The fallback can use **Private** end-to-end encrypted chunks or explicit **Turbo** chunks protected only by WSS/TLS for higher throughput.
+- Direct transfers use 32 KiB data-channel chunks. Both fallback modes use 512 KiB binary WebSocket frames, pause/resume, and a bounded 32 MiB relay window.
+- Chrome and Edge stream incoming large files directly to disk. A trusted device can authorize one auto-save folder and receive later files there without clicking Save.
 - Rooms delete their encrypted state after 24 hours.
 
 ## Architecture
@@ -29,10 +31,12 @@ GitHub Pages
        ├─ encrypted clipboard + signaling ── Cloudflare ClipboardRoom
        └─ file transfer
             ├─ preferred: direct WebRTC
-            └─ fallback: E2E-encrypted WebSocket chunks through ClipboardRoom
+            └─ fallback through ClipboardRoom
+                 ├─ Private: E2E-encrypted WebSocket chunks
+                 └─ Turbo: TLS-protected WebSocket chunks
 ```
 
-The relay can observe connection metadata and encrypted traffic sizes, but not clipboard text, room secrets, file names, or file bytes.
+The relay cannot read clipboard text, room secrets, file names, or transfer controls. In Private mode it also cannot read file bytes. Turbo intentionally lets the Worker see bulk file bytes to avoid browser encryption overhead; a corporate TLS-inspecting proxy may see them too.
 
 ## Handling a 1 GB file
 
@@ -43,9 +47,11 @@ The route is selected automatically:
 1. WebRTC attempts a direct connection.
 2. If it has not connected within 12 seconds, CopyPaesto closes that attempt.
 3. The transfer is offered again over the authenticated Worker WebSocket.
-4. Every fallback control message and binary chunk is encrypted in the browser before the Worker forwards it; file bytes are never converted to Base64.
+4. File names and every fallback control message remain end-to-end encrypted. Binary chunks use the selected Private or Turbo protection, and file bytes are never converted to Base64.
 
-Both computers must remain online until the transfer completes. Chrome or Edge is recommended for files over 128 MB because other browsers may not expose the streaming file-save API. Without that API, the memory-backed fallback is limited to 128 MB.
+The sending and receiving devices must remain online until the transfer completes. Chrome or Edge is recommended for files over 128 MB because other browsers may not expose the streaming file-save API. Without that API, the memory-backed fallback is limited to 128 MB.
+
+Trusted auto-save still requires one deliberate browser action: choose a destination folder and grant write permission on each receiving device. CopyPaesto stores the folder handle in that browser. If the browser drops permission after a restart, click **Turn on** once to reconnect it. Incoming name collisions receive a numbered name instead of overwriting an existing file.
 
 Interrupted transfers currently restart from the beginning. A future offline/resumable mode can use client-encrypted R2 multipart uploads with expiring objects.
 
@@ -58,20 +64,21 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173` in two browser windows. Each tab receives a distinct session-only device identity, so the full two-computer flow can be tested on one machine.
+Open `http://localhost:5173` in two or more browser profiles/windows. Each tab receives a distinct session-only device identity, so the multi-device flow can be tested on one machine.
 
 Useful commands:
 
 ```bash
 npm run check
 npm run build
+npm run test:protocol
 npm run test:relay
 npm run benchmark:relay
 npm run dev:web
 npm run dev:relay
 ```
 
-`npm run test:relay` covers short-code pairing, host authorization, ECDH credential handoff, room authentication, encrypted-state routing, signaling, and JSON/binary file-fallback routing. `npm run benchmark:relay` measures encrypted binary relay throughput with the production 512 KiB chunk size.
+`npm run test:protocol` verifies Private AES-GCM integrity and Turbo frame parsing. `npm run test:relay` covers multiple devices joining through short-code approval, ECDH credential handoff, room authentication, three-device clipboard routing, signaling, and Private/Turbo binary file routing. `npm run benchmark:relay` measures the production 512 KiB path; set `BENCHMARK_PROTECTION=e2e` or `BENCHMARK_PROTECTION=transport` to compare Private and Turbo.
 
 ## Deploy the relay
 

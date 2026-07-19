@@ -6,6 +6,7 @@ import { normalizeSessionCode } from "../lib/session";
 import type {
   ConnectionStatus,
   Peer,
+  RelayChunkProtection,
   RelayFilePayload,
   ServerMessage,
   SignalPayload,
@@ -54,6 +55,7 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
     transferId: string,
     offset: number,
     chunk: ArrayBuffer,
+    protection: RelayChunkProtection,
   ) => void>());
   const readyRef = useRef(false);
 
@@ -216,7 +218,7 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
                   if (!key || stopped) return;
                   const opened = await openRelayChunk(key, frame);
                   for (const listener of relayChunkListenersRef.current) {
-                    listener(opened.from, opened.transferId, opened.offset, opened.chunk);
+                    listener(opened.from, opened.transferId, opened.offset, opened.chunk, opened.protection);
                   }
                 })
                 .catch(() => {
@@ -243,7 +245,7 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
           });
           relayRef.current = relay;
           setStatus(reconnectAttempt ? "reconnecting" : "connecting");
-          setStatusDetail(reconnectAttempt ? "Reconnecting…" : "Connecting both machines…");
+          setStatusDetail(reconnectAttempt ? "Reconnecting…" : "Connecting your devices…");
           relay.connect(credentials.roomId, clientId, credentials.authVerifier, deviceName);
           return;
         }
@@ -344,6 +346,7 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
     transferId: string,
     offset: number,
     chunk: ArrayBuffer,
+    protection: RelayChunkProtection,
   ) => {
     const previous = relayFileSendChainsRef.current.get(transferId) ?? Promise.resolve();
     const next = previous
@@ -351,7 +354,7 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
       .then(async () => {
         const key = keyRef.current;
         if (!key || !readyRef.current) throw new Error("Session is not connected");
-        const frame = await sealRelayChunk(key, to, transferId, offset, chunk);
+        const frame = await sealRelayChunk(key, to, transferId, offset, chunk, protection);
         if (!relayRef.current?.sendBinary(frame)) throw new Error("Session is not connected");
       });
     relayFileSendChainsRef.current.set(transferId, next);
@@ -373,6 +376,7 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
     transferId: string,
     offset: number,
     chunk: ArrayBuffer,
+    protection: RelayChunkProtection,
   ) => void) => {
     relayChunkListenersRef.current.add(listener);
     return () => relayChunkListenersRef.current.delete(listener);

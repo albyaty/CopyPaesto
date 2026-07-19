@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { AddDeviceSheet } from "./components/AddDeviceSheet";
+import { useAutoSaveFolder } from "./hooks/useAutoSaveFolder";
 import { useFileTransfer } from "./hooks/useFileTransfer";
 import { useRoom } from "./hooks/useRoom";
 import {
@@ -22,7 +24,7 @@ import {
   isValidPairingCode,
   normalizePairingCode,
 } from "./lib/session";
-import type { ConnectionStatus, TransferItem } from "./types";
+import type { ConnectionStatus, Peer, RelayChunkProtection, TransferItem } from "./types";
 
 interface SessionState {
   code: string;
@@ -141,7 +143,7 @@ function Onboarding({ onEnter }: { onEnter: (session: SessionState, deviceName: 
   const requestToJoin = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!isValidPairingCode(pairingCode)) {
-      setError("Enter the 5-digit code shown on the other computer.");
+      setError("Enter the 5-digit code shown on the inviting device.");
       return;
     }
     setBusy(true);
@@ -306,7 +308,7 @@ function Onboarding({ onEnter }: { onEnter: (session: SessionState, deviceName: 
           <p className="eyebrow">One clipboard · two machines</p>
           <h1>Move thought<br />at typing speed.</h1>
           <p className="intro-body">
-            Pair with five digits, approve the other computer, then type or move files without ceremony.
+            Pair with five digits, approve each device, then type or move files without ceremony.
           </p>
           <div className="connection-sketch" aria-hidden="true">
             <span className="machine-dot"><i /></span>
@@ -319,8 +321,8 @@ function Onboarding({ onEnter }: { onEnter: (session: SessionState, deviceName: 
           {mode === "choice" && (
             <div className="entry-content enter-animation">
               <span className="step-number">PAIR / 05 DIGITS</span>
-              <h2>Connect two computers</h2>
-              <p>One short code. The other computer asks to join; you approve it here.</p>
+              <h2>Connect your devices</h2>
+              <p>Start with one short code, then invite more trusted devices from inside the room.</p>
 
               <label className="field-label" htmlFor="device-name">This computer is called</label>
               <input
@@ -345,7 +347,7 @@ function Onboarding({ onEnter }: { onEnter: (session: SessionState, deviceName: 
           {mode === "join" && (
             <form className="entry-content enter-animation" onSubmit={requestToJoin}>
               <button className="back-action" type="button" onClick={backToChoice}>← Back</button>
-              <span className="step-number">SECOND COMPUTER</span>
+              <span className="step-number">JOINING DEVICE</span>
               <h2>Enter five digits</h2>
               <p>Use the code visible on the first computer. Nothing else to type.</p>
 
@@ -394,7 +396,7 @@ function Onboarding({ onEnter }: { onEnter: (session: SessionState, deviceName: 
                 <div className="approval-request">
                   <span>CONNECTION REQUEST</span>
                   <strong>{pendingRequest.deviceName}</strong>
-                  <p>Approve only if this is the computer beside you.</p>
+                  <p>Approve only if this is the trusted device you are adding.</p>
                   <div>
                     <button disabled={busy} className="approve-button" onClick={() => void approveRequest()}>
                       {busy ? "Approving…" : "Approve"}
@@ -403,7 +405,7 @@ function Onboarding({ onEnter }: { onEnter: (session: SessionState, deviceName: 
                   </div>
                 </div>
               ) : (
-                <div className="pairing-wait"><i /><span>Waiting for the second computer…</span></div>
+                <div className="pairing-wait"><i /><span>Waiting for another device…</span></div>
               )}
               {error && <p className="form-error" role="alert">{error}</p>}
             </div>
@@ -424,7 +426,7 @@ function Onboarding({ onEnter }: { onEnter: (session: SessionState, deviceName: 
           )}
 
           <footer className="entry-footer">
-            <span>1 code · 1 approval</span>
+            <span>5 digits · explicit approval</span>
             <span>Pairing expires in 10 min</span>
           </footer>
         </div>
@@ -467,27 +469,56 @@ function ConnectionBadge({ status, peerCount }: { status: ConnectionStatus; peer
 }
 
 function SessionSheet({
+  deviceName,
+  peers,
+  canAddDevice,
+  onAddDevice,
   onClose,
 }: {
+  deviceName: string;
+  peers: Peer[];
+  canAddDevice: boolean;
+  onAddDevice: () => void;
   onClose: () => void;
 }) {
+  const devices = [{ id: "this-device", name: deviceName, current: true }, ...peers.map((peer) => ({
+    ...peer,
+    current: false,
+  }))];
   return (
     <div className="sheet-backdrop" onMouseDown={onClose}>
       <section className="session-sheet" onMouseDown={(event) => event.stopPropagation()} aria-modal="true" role="dialog">
         <button className="sheet-close" onClick={onClose} aria-label="Close">×</button>
         <span className="step-number">PRIVATE SESSION</span>
-        <h2>Your computers are paired</h2>
-        <p>The five-digit code has done its job. The private room credentials stay hidden in browser memory.</p>
+        <h2>{devices.length} {devices.length === 1 ? "device" : "devices"} in this room</h2>
+        <p>Clipboard changes reach every connected device. File transfers go only to the recipient you choose.</p>
+
+        <div className="session-device-list" aria-label="Connected devices">
+          {devices.map((device) => (
+            <div key={device.id}>
+              <i />
+              <strong>{device.name}</strong>
+              <span>{device.current ? "This device" : "Connected"}</span>
+            </div>
+          ))}
+        </div>
 
         <div className="session-fact">
           <LockIcon />
-          <div><strong>End-to-end encrypted</strong><span>Clipboard content is encrypted before it reaches the relay.</span></div>
+          <div><strong>Clipboard stays end-to-end encrypted</strong><span>Clipboard content and session controls are encrypted before they reach the relay.</span></div>
         </div>
         <div className="session-fact">
           <span className="session-fact-number">24h</span>
           <div><strong>Temporary by default</strong><span>The room and its encrypted state expire automatically.</span></div>
         </div>
-        <div className="security-caption">To pair a different computer, leave this room and create a fresh five-digit code.</div>
+        <button
+          className="add-device-sheet-button"
+          disabled={!canAddDevice}
+          onClick={onAddDevice}
+        >
+          {canAddDevice ? "+ Add another device" : "Room is full"}
+        </button>
+        <div className="security-caption">Up to eight devices can join. Open a fresh five-digit invitation whenever you want to add one, and approve every requester separately.</div>
       </section>
     </div>
   );
@@ -506,12 +537,17 @@ function TransferRow({
 }) {
   const percent = item.size ? Math.min(100, (item.transferred / item.size) * 100) : 0;
   const canPause = item.status === "transferring" || item.status === "paused";
+  const route = item.relayProtection === "transport"
+    ? "Turbo relay"
+    : item.relayProtection === "e2e"
+      ? "Private relay"
+      : "Direct";
   return (
     <div className={`transfer-row transfer-${item.status}`}>
       <div className="file-glyph"><FileIcon /></div>
       <div className="transfer-info">
         <strong title={item.name}>{item.name}</strong>
-        <span>{transferLabel(item)} · {formatBytes(item.size)}</span>
+        <span>{transferLabel(item)} · {formatBytes(item.size)} · {route}{item.autoSaved ? " · Auto-save" : ""}</span>
         {item.error && <em>{item.error}</em>}
         {!['offered', 'waiting', 'declined', 'failed'].includes(item.status) && (
           <div className="progress-track"><i style={{ width: `${percent}%` }} /></div>
@@ -540,6 +576,7 @@ function Workspace({ session, deviceName, onLeave }: {
     clientId,
     deviceName,
   });
+  const autoSave = useAutoSaveFolder();
   const files = useFileTransfer({
     peers: room.peers,
     turnAccess: room.turnAccess,
@@ -549,13 +586,32 @@ function Workspace({ session, deviceName, onLeave }: {
     sendRelayChunk: room.sendRelayChunk,
     subscribeToRelayFiles: room.subscribeToRelayFiles,
     subscribeToRelayChunks: room.subscribeToRelayChunks,
+    createAutoSaveTarget: autoSave.ready ? autoSave.createTarget : undefined,
   });
   const [activeSlot, setActiveSlot] = useState(0);
   const [showSession, setShowSession] = useState(false);
+  const [showAddDevice, setShowAddDevice] = useState(false);
+  const [selectedPeerId, setSelectedPeerId] = useState("");
+  const [relayProtection, setRelayProtection] = useState<RelayChunkProtection>(() => (
+    localStorage.getItem("copypaesto:file-relay-protection") === "transport" ? "transport" : "e2e"
+  ));
   const [copied, setCopied] = useState(false);
   const [dragging, setDragging] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const active = room.slots[activeSlot];
+  const selectedPeer = room.peers.find((peer) => peer.id === selectedPeerId) ?? null;
+  const canAddDevice = room.peers.length < 7;
+
+  useEffect(() => {
+    setSelectedPeerId((current) => room.peers.some((peer) => peer.id === current)
+      ? current
+      : room.peers[0]?.id ?? "");
+  }, [room.peers]);
+
+  const chooseRelayProtection = (next: RelayChunkProtection) => {
+    setRelayProtection(next);
+    localStorage.setItem("copypaesto:file-relay-protection", next);
+  };
 
   const copyActive = async () => {
     await copyText(active.text);
@@ -574,12 +630,16 @@ function Workspace({ session, deviceName, onLeave }: {
 
   const offerFiles = (list: FileList | File[]) => {
     const selected = Array.from(list);
-    if (selected.length) void files.sendFiles(selected);
+    if (selected.length && selectedPeer) {
+      void files.sendFiles(selected, selectedPeer.id, relayProtection);
+    } else if (selected.length) {
+      files.setNotice("Choose a connected device before sending a file.");
+    }
   };
 
   const chooseFiles = () => {
     if (!room.peers.length) {
-      files.setNotice("Connect the second machine before choosing a file.");
+      files.setNotice("Connect another device before choosing a file.");
       return;
     }
     fileInput.current?.click();
@@ -606,6 +666,11 @@ function Workspace({ session, deviceName, onLeave }: {
           <span className="status-detail">{room.statusDetail}</span>
         </div>
         <div className="header-actions">
+          <button
+            className="add-device-button"
+            disabled={!canAddDevice}
+            onClick={() => setShowAddDevice(true)}
+          >+ Device</button>
           <button className="session-button" onClick={() => setShowSession(true)}><LockIcon /> Private</button>
           <button className="leave-button" onClick={onLeave}>Leave</button>
         </div>
@@ -638,14 +703,14 @@ function Workspace({ session, deviceName, onLeave }: {
               <h1>Live text</h1>
             </div>
             <div className="editor-meta">
-              {active.author ? `Last edited by ${active.author}` : "Ready on both machines"}
+              {active.author ? `Last edited by ${active.author}` : "Ready on connected devices"}
             </div>
           </div>
 
           <textarea
             aria-label={`Clipboard slot ${activeSlot + 1}`}
             className="clipboard-editor"
-            placeholder="Type or paste here. It appears on the other machine as you work…"
+            placeholder="Type or paste here. It appears on your other devices as you work…"
             value={active.text}
             maxLength={120_000}
             onChange={(event) => room.updateSlot(activeSlot, event.target.value)}
@@ -668,7 +733,43 @@ function Workspace({ session, deviceName, onLeave }: {
               <span>DIRECT TRANSFER</span>
               <h2>Files</h2>
             </div>
-            <span className="route-label">{files.relayAvailable ? "Relay fallback ready" : "Direct route"}</span>
+            <span className="route-label">Direct first · {relayProtection === "transport" ? "Turbo" : "Private"} fallback</span>
+          </div>
+
+          <div className="file-routing-controls">
+            <div className="recipient-picker">
+              <span>SEND TO</span>
+              <div>
+                {room.peers.length ? room.peers.map((peer) => (
+                  <button
+                    key={peer.id}
+                    className={selectedPeerId === peer.id ? "selected" : ""}
+                    onClick={() => setSelectedPeerId(peer.id)}
+                  >
+                    <i />{peer.name}
+                  </button>
+                )) : <em>No other devices connected</em>}
+              </div>
+            </div>
+
+            <div className={`relay-mode ${relayProtection === "transport" ? "is-turbo" : ""}`}>
+              <div className="relay-mode-heading">
+                <span>IF DIRECT IS BLOCKED</span>
+                <div role="group" aria-label="File relay protection">
+                  <button
+                    className={relayProtection === "e2e" ? "selected" : ""}
+                    onClick={() => chooseRelayProtection("e2e")}
+                  >Private</button>
+                  <button
+                    className={relayProtection === "transport" ? "selected" : ""}
+                    onClick={() => chooseRelayProtection("transport")}
+                  >Turbo</button>
+                </div>
+              </div>
+              <small>{relayProtection === "transport"
+                ? "Faster bulk transfer. File bytes use TLS, so Cloudflare or a work TLS proxy could inspect them."
+                : "File bytes remain end-to-end encrypted through the relay."}</small>
+            </div>
           </div>
 
           <button
@@ -685,7 +786,7 @@ function Workspace({ session, deviceName, onLeave }: {
           >
             <span className="drop-arrow">↗</span>
             <strong>Drop anything</strong>
-            <small>{room.peers.length ? `Send to ${room.peers[0].name}` : "Waiting for the other machine"}</small>
+            <small>{selectedPeer ? `Send to ${selectedPeer.name}` : "Waiting for another device"}</small>
           </button>
           <input
             ref={fileInput}
@@ -702,6 +803,33 @@ function Workspace({ session, deviceName, onLeave }: {
             <strong>Large files stay light.</strong>
             <span>Chunks stream straight to disk, so a 1 GB file does not occupy 1 GB of browser memory.</span>
           </div>
+
+          <div className={`auto-save-control ${autoSave.ready ? "is-enabled" : ""}`}>
+            <div>
+              <span>TRUSTED AUTO-SAVE</span>
+              <strong>{autoSave.ready ? `Saving to ${autoSave.folderName}` : "Manual approval is on"}</strong>
+              <small>{!autoSave.supported
+                ? "Automatic disk saving needs Chrome or Edge."
+                : autoSave.ready
+                  ? "Incoming files start immediately; existing files are never overwritten."
+                  : autoSave.enabled
+                    ? "Reconnect folder permission to resume automatic saving."
+                    : "Choose a folder once to receive trusted files without clicking Save."}</small>
+              {autoSave.ready && (
+                <button className="auto-save-change" onClick={() => void autoSave.chooseFolder()}>
+                  Change folder
+                </button>
+              )}
+            </div>
+            <button
+              disabled={!autoSave.supported || autoSave.busy}
+              aria-pressed={autoSave.ready}
+              onClick={() => autoSave.ready ? autoSave.disable() : void autoSave.enable()}
+            >
+              {autoSave.busy ? "Opening…" : autoSave.ready ? "Turn off" : autoSave.folderName ? "Turn on" : "Choose folder"}
+            </button>
+          </div>
+          {autoSave.error && <div className="auto-save-error">{autoSave.error}</div>}
 
           {files.notice && <div className="file-notice">{files.notice}<button onClick={() => files.setNotice("")}>×</button></div>}
 
@@ -721,7 +849,26 @@ function Workspace({ session, deviceName, onLeave }: {
         </aside>
       </div>
 
-      {showSession && <SessionSheet onClose={() => setShowSession(false)} />}
+      {showSession && (
+        <SessionSheet
+          deviceName={deviceName}
+          peers={room.peers}
+          canAddDevice={canAddDevice}
+          onAddDevice={() => {
+            setShowSession(false);
+            setShowAddDevice(true);
+          }}
+          onClose={() => setShowSession(false)}
+        />
+      )}
+      {showAddDevice && canAddDevice && (
+        <AddDeviceSheet
+          clientId={clientId}
+          deviceName={deviceName}
+          session={session}
+          onClose={() => setShowAddDevice(false)}
+        />
+      )}
     </main>
   );
 }

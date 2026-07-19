@@ -92,6 +92,7 @@ async function open(privateKey, peerPublicKey, requestId, envelope) {
 async function testPairing() {
   const host = await identity();
   const joiner = await identity();
+  const thirdDevice = await identity();
   const created = await jsonRequest("/pairings", {
     method: "POST",
     body: JSON.stringify({ hostId: "pair-host", hostName: "Host laptop", hostPublicKey: host.publicKey }),
@@ -119,6 +120,18 @@ async function testPairing() {
   assert.equal(joined.response.status, 201);
   assert.deepEqual(joined.body.hostPublicKey.x, host.publicKey.x);
 
+  const thirdJoined = await jsonRequest("/pairings/join", {
+    method: "POST",
+    body: JSON.stringify({
+      code: created.body.code,
+      joinerId: "pair-third",
+      joinerName: "Work VM",
+      joinerPublicKey: thirdDevice.publicKey,
+    }),
+  });
+  assert.equal(thirdJoined.response.status, 201);
+  assert.deepEqual(thirdJoined.body.hostPublicKey.x, host.publicKey.x);
+
   const unauthorized = await jsonRequest(
     `/pairings/${created.body.pairingId}/requests`,
     { token: randomBytes(32).toString("base64url") },
@@ -130,8 +143,13 @@ async function testPairing() {
     { token: created.body.hostToken },
   );
   assert.equal(requests.response.status, 200);
-  assert.equal(requests.body.requests.length, 1);
-  assert.equal(requests.body.requests[0].deviceName, "Second laptop");
+  assert.equal(requests.body.requests.length, 2);
+  const secondRequest = requests.body.requests.find((request) => request.requestId === joined.body.requestId);
+  const thirdRequest = requests.body.requests.find((request) => request.requestId === thirdJoined.body.requestId);
+  assert.ok(secondRequest);
+  assert.ok(thirdRequest);
+  assert.equal(secondRequest.deviceName, "Second laptop");
+  assert.equal(thirdRequest.deviceName, "Work VM");
 
   const hiddenSession = {
     code: randomBytes(9).toString("base64url").slice(0, 12).toUpperCase(),
@@ -139,7 +157,7 @@ async function testPairing() {
   };
   const envelope = await seal(
     host.keyPair.privateKey,
-    requests.body.requests[0].publicKey,
+    secondRequest.publicKey,
     joined.body.requestId,
     hiddenSession,
   );
@@ -165,6 +183,34 @@ async function testPairing() {
     status.body.envelope,
   );
   assert.deepEqual(opened, hiddenSession);
+
+  const thirdEnvelope = await seal(
+    host.keyPair.privateKey,
+    thirdRequest.publicKey,
+    thirdJoined.body.requestId,
+    hiddenSession,
+  );
+  const thirdApproved = await jsonRequest(
+    `/pairings/${created.body.pairingId}/requests/${thirdJoined.body.requestId}/approve`,
+    {
+      method: "POST",
+      token: created.body.hostToken,
+      body: JSON.stringify({ envelope: thirdEnvelope }),
+    },
+  );
+  assert.equal(thirdApproved.response.status, 200);
+
+  const thirdStatus = await jsonRequest(
+    `/pairings/${created.body.pairingId}/requests/${thirdJoined.body.requestId}`,
+    { token: thirdJoined.body.joinToken },
+  );
+  const thirdOpened = await open(
+    thirdDevice.keyPair.privateKey,
+    thirdJoined.body.hostPublicKey,
+    thirdJoined.body.requestId,
+    thirdStatus.body.envelope,
+  );
+  assert.deepEqual(thirdOpened, hiddenSession);
 }
 
 function connect(roomId, clientId) {
@@ -251,11 +297,25 @@ async function testRoom() {
   const presence = await second.next((message) => message.type === "presence" && message.peers.length === 2);
   assert.deepEqual(new Set(presence.peers.map((peer) => peer.id)), new Set(["integration-a", "integration-b"]));
 
+  const third = connect(roomId, "integration-c");
+  await third.opened;
+  third.socket.send(JSON.stringify({ type: "authenticate", verifier, name: "Test C" }));
+  await third.next((message) => message.type === "authenticated");
+  await third.next((message) => message.type === "snapshot");
+  const threeDevicePresence = await third.next((message) => message.type === "presence" && message.peers.length === 3);
+  assert.deepEqual(
+    new Set(threeDevicePresence.peers.map((peer) => peer.id)),
+    new Set(["integration-a", "integration-b", "integration-c"]),
+  );
+
   const envelope = { v: 1, iv: "test-iv", data: "encrypted-test-payload" };
   first.socket.send(JSON.stringify({ type: "slot:update", slot: 1, envelope }));
   const update = await second.next((message) => message.type === "slot:update" && message.slot === 1);
+  const thirdUpdate = await third.next((message) => message.type === "slot:update" && message.slot === 1);
   assert.equal(update.sequence, 1);
   assert.deepEqual(update.envelope, envelope);
+  assert.equal(thirdUpdate.sequence, 1);
+  assert.deepEqual(thirdUpdate.envelope, envelope);
 
   first.socket.send(JSON.stringify({ type: "signal", to: "integration-b", envelope }));
   const signal = await second.next((message) => message.type === "signal");
@@ -291,11 +351,37 @@ async function testRoom() {
     Buffer.from(opaqueEncryptedPayload),
   );
 
+  const turboTarget = encoder.encode("integration-c");
+  const turboTransfer = encoder.encode("turbo-transfer");
+  const turboChunk = randomBytes(128 * 1024);
+  const turboPayload = new Uint8Array(1 + turboTransfer.length + 8 + turboChunk.length);
+  turboPayload[0] = turboTransfer.length;
+  turboPayload.set(turboTransfer, 1);
+  new DataView(turboPayload.buffer).setBigUint64(1 + turboTransfer.length, 0n);
+  turboPayload.set(turboChunk, 1 + turboTransfer.length + 8);
+  const turboFrame = new Uint8Array(2 + turboTarget.length + turboPayload.length);
+  turboFrame[0] = 2;
+  turboFrame[1] = turboTarget.length;
+  turboFrame.set(turboTarget, 2);
+  turboFrame.set(turboPayload, 2 + turboTarget.length);
+  first.socket.send(turboFrame.buffer);
+
+  const turboRelay = await third.next((message) => message.type === "binary");
+  const turboForwarded = new Uint8Array(turboRelay.data);
+  assert.equal(turboForwarded[0], 2);
+  const turboSourceLength = turboForwarded[1];
+  assert.equal(decoder.decode(turboForwarded.subarray(2, 2 + turboSourceLength)), "integration-a");
+  assert.deepEqual(
+    Buffer.from(turboForwarded.subarray(2 + turboSourceLength)),
+    Buffer.from(turboPayload),
+  );
+
   first.socket.close(1000, "Test complete");
   second.socket.close(1000, "Test complete");
+  third.socket.close(1000, "Test complete");
 }
 
 await testPairing();
 await testRoom();
 
-console.log("Relay integration passed: 5-digit host-approved pairing, E2E handoff, PIN gate, encrypted state, signaling, and JSON/binary file fallback routing.");
+console.log("Relay integration passed: multi-device 5-digit approval, E2E handoff, PIN gate, three-device clipboard sync, signaling, and private/Turbo file routing.");

@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MAX_RELAY_CHUNK_BYTES } from "../lib/fileRelay";
 import { fetchIceServers, type TurnAccess } from "../lib/relay";
-import type { Peer, RelayFilePayload, SignalPayload, TransferItem } from "../types";
+import type { AutoSaveWritableTarget } from "./useAutoSaveFolder";
+import type {
+  Peer,
+  RelayChunkProtection,
+  RelayFilePayload,
+  SignalPayload,
+  TransferItem,
+} from "../types";
 
 const DIRECT_CHUNK_SIZE = 32 * 1024;
 const LEGACY_RELAY_CHUNK_SIZE = 32 * 1024;
@@ -44,6 +51,7 @@ interface TransferSession {
   direction: "send" | "receive";
   transport: "webrtc" | "relay";
   binaryRelay: boolean;
+  relayProtection: RelayChunkProtection;
   peerId: string;
   peerName: string;
   pc?: RTCPeerConnection;
@@ -79,13 +87,21 @@ interface FileTransferOptions {
     transferId: string,
     offset: number,
     chunk: ArrayBuffer,
+    protection: RelayChunkProtection,
   ) => Promise<void>;
   subscribeToRelayFiles: (
     listener: (from: string, payload: RelayFilePayload) => void,
   ) => () => void;
   subscribeToRelayChunks: (
-    listener: (from: string, transferId: string, offset: number, chunk: ArrayBuffer) => void,
+    listener: (
+      from: string,
+      transferId: string,
+      offset: number,
+      chunk: ArrayBuffer,
+      protection: RelayChunkProtection,
+    ) => void,
   ) => () => void;
+  createAutoSaveTarget?: (suggestedName: string) => Promise<AutoSaveWritableTarget>;
 }
 
 type SavePickerWindow = Window & {
@@ -136,6 +152,7 @@ function relayControl(session: TransferSession, message: ControlMessage): RelayF
       mime: message.mime,
       lastModified: message.lastModified,
       binary: true,
+      protection: session.relayProtection,
     };
   }
   if (message.type === "accept") {
@@ -143,6 +160,7 @@ function relayControl(session: TransferSession, message: ControlMessage): RelayF
       kind: "accept",
       transferId: session.id,
       ...(session.binaryRelay ? { binary: true as const } : {}),
+      ...(session.binaryRelay ? { protection: session.relayProtection } : {}),
     };
   }
   if (message.type === "transfer-error") {
@@ -163,6 +181,7 @@ export function useFileTransfer({
   sendRelayChunk,
   subscribeToRelayFiles,
   subscribeToRelayChunks,
+  createAutoSaveTarget,
 }: FileTransferOptions) {
   const [transfers, setTransfers] = useState<TransferItem[]>([]);
   const [notice, setNotice] = useState("");
@@ -170,6 +189,7 @@ export function useFileTransfer({
   const pendingCandidatesRef = useRef(new Map<string, RTCIceCandidateInit[]>());
   const signalChainsRef = useRef(new Map<string, Promise<void>>());
   const relayChainsRef = useRef(new Map<string, Promise<void>>());
+  const relayPreferredPeersRef = useRef(new Set<string>());
   const peersRef = useRef(peers);
   const iceConfigRef = useRef<{ key: string; promise: Promise<RTCConfiguration> } | null>(null);
 
@@ -237,6 +257,41 @@ export function useFileTransfer({
     notifyFlow(session);
   }, [notifyFlow, sendSessionControl, updateTransfer]);
 
+  const acceptSession = useCallback(async (session: TransferSession, automatic: boolean) => {
+    if (!session.offer || session.closed) return;
+    try {
+      if (automatic) {
+        if (!createAutoSaveTarget) return;
+        const target = await createAutoSaveTarget(session.offer.name);
+        session.writable = target.writable;
+        updateTransfer(session.id, { name: target.savedName, autoSaved: true });
+      } else {
+        const picker = (window as SavePickerWindow).showSaveFilePicker;
+        if (picker) {
+          const handle = await picker.call(window, { suggestedName: session.offer.name });
+          session.writable = await handle.createWritable();
+        } else if (session.offer.size <= MEMORY_FALLBACK_LIMIT) {
+          session.chunks = [];
+        } else {
+          setNotice("Files over 128 MB need Chrome or Edge so CopyPaesto can stream directly to disk.");
+          return;
+        }
+      }
+      updateTransfer(session.id, { status: "transferring", error: undefined });
+      await sendSessionControl(session, { type: "accept" });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      if (automatic) {
+        await session.writable?.abort?.(error).catch(() => undefined);
+        session.writable = undefined;
+        updateTransfer(session.id, { status: "offered", autoSaved: false });
+        setNotice("Trusted auto-save needs attention. You can still click Save for this file.");
+        return;
+      }
+      failSession(session, error instanceof Error ? error.message : "Could not create the destination file");
+    }
+  }, [createAutoSaveTarget, failSession, sendSessionControl, updateTransfer]);
+
   const finishReceiver = useCallback(async (session: TransferSession) => {
     try {
       await session.writeQueue;
@@ -295,7 +350,7 @@ export function useFileTransfer({
     const { file } = session;
     try {
       while (session.sent < file.size) {
-        if (session.closed) throw new Error("The other computer disconnected");
+        if (session.closed) throw new Error("The other device disconnected");
         if (session.transport === "webrtc" && session.channel?.readyState !== "open") {
           throw new Error("The direct connection closed");
         }
@@ -321,7 +376,13 @@ export function useFileTransfer({
         const chunk = await file.slice(offset, end).arrayBuffer();
         if (session.transport === "relay") {
           if (session.binaryRelay) {
-            await sendRelayChunk(session.peerId, session.id, offset, chunk);
+            await sendRelayChunk(
+              session.peerId,
+              session.id,
+              offset,
+              chunk,
+              session.relayProtection,
+            );
           } else {
             await sendRelayFile(session.peerId, {
               kind: "chunk",
@@ -355,8 +416,10 @@ export function useFileTransfer({
           transferred: 0,
           status: "offered",
           peerName: session.peerName,
+          ...(session.transport === "relay" ? { relayProtection: session.relayProtection } : {}),
         }, ...current];
       });
+      if (createAutoSaveTarget) void acceptSession(session, true);
       return;
     }
 
@@ -408,10 +471,11 @@ export function useFileTransfer({
     }
 
     if (message.type === "transfer-error") failSession(session, message.message, false);
-  }, [failSession, finishReceiver, notifyFlow, sendFileData, updateTransfer]);
+  }, [acceptSession, createAutoSaveTarget, failSession, finishReceiver, notifyFlow, sendFileData, updateTransfer]);
 
   const fallbackToRelay = useCallback(async (session: TransferSession) => {
     if (session.closed || session.transport === "relay" || session.direction !== "send" || !session.file) return;
+    relayPreferredPeersRef.current.add(session.peerId);
     window.clearTimeout(session.fallbackTimer);
     session.transport = "relay";
     session.channel?.close();
@@ -425,8 +489,15 @@ export function useFileTransfer({
     session.nextOffset = 0;
     session.lastAck = 0;
     session.lastProgressAt = 0;
-    updateTransfer(session.id, { status: "connecting", transferred: 0, error: undefined });
-    setNotice("The direct connection was blocked, so this file is using the encrypted relay.");
+    updateTransfer(session.id, {
+      status: "connecting",
+      transferred: 0,
+      relayProtection: session.relayProtection,
+      error: undefined,
+    });
+    setNotice(session.relayProtection === "transport"
+      ? "The direct route was blocked, so this file is using the faster Turbo relay."
+      : "The direct route was blocked, so this file is using the end-to-end encrypted relay.");
     try {
       await sendSessionControl(session, {
         type: "file-offer",
@@ -437,7 +508,7 @@ export function useFileTransfer({
       });
       updateTransfer(session.id, { status: "waiting" });
     } catch (error) {
-      failSession(session, error instanceof Error ? error.message : "The encrypted relay could not start");
+      failSession(session, error instanceof Error ? error.message : "The file relay could not start");
     }
   }, [failSession, sendSessionControl, updateTransfer]);
 
@@ -466,7 +537,7 @@ export function useFileTransfer({
         try {
           handleControl(session, JSON.parse(event.data) as ControlMessage);
         } catch {
-          failSession(session, "The other computer sent an invalid transfer message");
+          failSession(session, "The other device sent an invalid transfer message");
         }
       } else if (event.data instanceof ArrayBuffer) {
         session.nextOffset += event.data.byteLength;
@@ -485,17 +556,17 @@ export function useFileTransfer({
     direction: "send" | "receive",
     peerId: string,
     file?: File,
+    relayProtection: RelayChunkProtection = "e2e",
   ) => {
-    const pc = new RTCPeerConnection(await iceConfiguration());
-    const peerName = peersRef.current.find((peer) => peer.id === peerId)?.name ?? "Other computer";
+    const peerName = peersRef.current.find((peer) => peer.id === peerId)?.name ?? "Other device";
     const session: TransferSession = {
       id,
       direction,
       transport: "webrtc",
       binaryRelay: false,
+      relayProtection,
       peerId,
       peerName,
-      pc,
       file,
       sent: 0,
       acked: 0,
@@ -510,6 +581,8 @@ export function useFileTransfer({
       flowWaiters: new Set(),
     };
     sessionsRef.current.set(id, session);
+    const pc = new RTCPeerConnection(await iceConfiguration());
+    session.pc = pc;
 
     if (direction === "send") {
       session.fallbackTimer = window.setTimeout(() => void fallbackToRelay(session), DIRECT_ROUTE_TIMEOUT);
@@ -529,7 +602,7 @@ export function useFileTransfer({
     pc.addEventListener("connectionstatechange", () => {
       if (pc.connectionState !== "failed" || session.transport !== "webrtc" || session.closed) return;
       if (session.direction === "send" && session.sent === 0) void fallbackToRelay(session);
-      else if (session.received > 0 || session.started) failSession(session, "A file route between the computers could not be made");
+      else if (session.received > 0 || session.started) failSession(session, "A file route between the devices could not be made");
     });
     return session;
   }, [failSession, fallbackToRelay, iceConfiguration, sendSignal]);
@@ -581,9 +654,12 @@ export function useFileTransfer({
         window.clearTimeout(existing.fallbackTimer);
         existing.channel?.close();
         existing.pc?.close();
-        void existing.writable?.abort?.("Switching to encrypted relay");
+        void existing.writable?.abort?.("Switching to file relay");
       }
-      const peerName = peersRef.current.find((peer) => peer.id === from)?.name ?? "Other computer";
+      const peerName = peersRef.current.find((peer) => peer.id === from)?.name ?? "Other device";
+      const relayProtection: RelayChunkProtection = payload.protection === "transport"
+        ? "transport"
+        : "e2e";
       const offer: FileOffer = {
         type: "file-offer",
         name: payload.name,
@@ -596,6 +672,7 @@ export function useFileTransfer({
         direction: "receive",
         transport: "relay",
         binaryRelay: payload.binary === true,
+        relayProtection,
         peerId: from,
         peerName,
         offer,
@@ -621,12 +698,16 @@ export function useFileTransfer({
           transferred: 0,
           status: "offered",
           peerName,
+          relayProtection,
         };
         return current.some((currentItem) => currentItem.id === session.id)
           ? current.map((currentItem) => currentItem.id === session.id ? item : currentItem)
           : [item, ...current];
       });
-      setNotice("The direct connection was blocked, so this file is using the encrypted relay.");
+      setNotice(relayProtection === "transport"
+        ? "Incoming file is using Turbo relay: protected by the web connection, not end-to-end chunk encryption."
+        : "Incoming file is using the end-to-end encrypted relay.");
+      if (createAutoSaveTarget) void acceptSession(session, true);
       return;
     }
 
@@ -659,6 +740,12 @@ export function useFileTransfer({
     };
     if (payload.kind === "accept") {
       session.binaryRelay = payload.binary === true;
+      session.relayProtection = session.binaryRelay
+        && session.relayProtection === "transport"
+        && payload.protection === "transport"
+        ? "transport"
+        : "e2e";
+      updateTransfer(session.id, { relayProtection: session.relayProtection });
       handleControl(session, { type: "accept" });
     } else if (payload.kind === "ack") handleControl(session, { type: "ack", received: payload.received });
     else if (payload.kind === "error") failSession(session, payload.message, false);
@@ -666,13 +753,14 @@ export function useFileTransfer({
       const message = controls[payload.kind];
       if (message) handleControl(session, message);
     }
-  }, [failSession, handleControl, receiveChunk]);
+  }, [acceptSession, createAutoSaveTarget, failSession, handleControl, receiveChunk, updateTransfer]);
 
   const processRelayChunk = useCallback((
     from: string,
     transferId: string,
     offset: number,
     chunk: ArrayBuffer,
+    protection: RelayChunkProtection,
   ) => {
     const session = sessionsRef.current.get(transferId);
     if (
@@ -682,6 +770,10 @@ export function useFileTransfer({
       session.peerId !== from ||
       session.closed
     ) return;
+    if (session.relayProtection !== protection) {
+      failSession(session, "File protection changed unexpectedly");
+      return;
+    }
     if (offset !== session.nextOffset) {
       failSession(session, "File chunks arrived out of order");
       return;
@@ -711,19 +803,19 @@ export function useFileTransfer({
       .then(() => processRelayFile(from, payload))
       .catch(() => {
         const session = sessionsRef.current.get(payload.transferId);
-        if (session) failSession(session, "The encrypted file relay stopped");
+        if (session) failSession(session, "The file relay stopped");
       });
     relayChainsRef.current.set(payload.transferId, next);
   }), [failSession, processRelayFile, subscribeToRelayFiles]);
 
-  useEffect(() => subscribeToRelayChunks((from, transferId, offset, chunk) => {
+  useEffect(() => subscribeToRelayChunks((from, transferId, offset, chunk, protection) => {
     const previous = relayChainsRef.current.get(transferId) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
-      .then(() => processRelayChunk(from, transferId, offset, chunk))
+      .then(() => processRelayChunk(from, transferId, offset, chunk, protection))
       .catch(() => {
         const session = sessionsRef.current.get(transferId);
-        if (session) failSession(session, "The encrypted file relay stopped");
+        if (session) failSession(session, "The file relay stopped");
       });
     relayChainsRef.current.set(transferId, next);
   }), [failSession, processRelayChunk, subscribeToRelayChunks]);
@@ -740,12 +832,17 @@ export function useFileTransfer({
     pendingCandidatesRef.current.clear();
     signalChainsRef.current.clear();
     relayChainsRef.current.clear();
+    relayPreferredPeersRef.current.clear();
   }, []);
 
-  const sendFiles = useCallback(async (files: File[]) => {
-    const peer = peersRef.current[0];
+  const sendFiles = useCallback(async (
+    files: File[],
+    peerId: string,
+    relayProtection: RelayChunkProtection = "e2e",
+  ) => {
+    const peer = peersRef.current.find((candidate) => candidate.id === peerId);
     if (!peer) {
-      setNotice("Connect the second computer before sending a file.");
+      setNotice("Choose a connected device before sending a file.");
       return;
     }
     setNotice("");
@@ -762,7 +859,11 @@ export function useFileTransfer({
         peerName: peer.name,
       }, ...current]);
       try {
-        const session = await createDirectSession(id, "send", peer.id, file);
+        const session = await createDirectSession(id, "send", peer.id, file, relayProtection);
+        if (relayPreferredPeersRef.current.has(peer.id)) {
+          await fallbackToRelay(session);
+          continue;
+        }
         if (!session.pc) throw new Error("Direct transfer is unavailable");
         const channel = session.pc.createDataChannel(`copypaesto:${id}`, { ordered: true });
         attachChannel(session, channel);
@@ -779,24 +880,8 @@ export function useFileTransfer({
   const acceptTransfer = useCallback(async (id: string) => {
     const session = sessionsRef.current.get(id);
     if (!session?.offer) return;
-    try {
-      const picker = (window as SavePickerWindow).showSaveFilePicker;
-      if (picker) {
-        const handle = await picker.call(window, { suggestedName: session.offer.name });
-        session.writable = await handle.createWritable();
-      } else if (session.offer.size <= MEMORY_FALLBACK_LIMIT) {
-        session.chunks = [];
-      } else {
-        setNotice("Files over 128 MB need Chrome or Edge so CopyPaesto can stream directly to disk.");
-        return;
-      }
-      updateTransfer(id, { status: "transferring", error: undefined });
-      await sendSessionControl(session, { type: "accept" });
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return;
-      failSession(session, error instanceof Error ? error.message : "Could not create the destination file");
-    }
-  }, [failSession, sendSessionControl, updateTransfer]);
+    await acceptSession(session, false);
+  }, [acceptSession]);
 
   const declineTransfer = useCallback((id: string) => {
     const session = sessionsRef.current.get(id);

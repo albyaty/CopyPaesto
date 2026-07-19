@@ -27,9 +27,11 @@ export type SignalPayload =
   | { kind: "answer"; transferId: string; description: RTCSessionDescriptionInit }
   | { kind: "ice"; transferId: string; candidate: RTCIceCandidateInit };
 
+export type RelayChunkProtection = "e2e" | "transport";
+
 export type RelayFilePayload =
-  | { kind: "offer"; transferId: string; name: string; size: number; mime: string; lastModified: number; binary?: true }
-  | { kind: "accept"; transferId: string; binary?: true }
+  | { kind: "offer"; transferId: string; name: string; size: number; mime: string; lastModified: number; binary?: true; protection?: RelayChunkProtection }
+  | { kind: "accept"; transferId: string; binary?: true; protection?: RelayChunkProtection }
   | { kind: "decline"; transferId: string }
   | { kind: "chunk"; transferId: string; offset: number; data: string }
   | { kind: "ack"; transferId: string; received: number }
@@ -77,5 +79,7 @@ export interface TransferItem {
   transferred: number;
   status: TransferStatus;
   peerName: string;
+  relayProtection?: RelayChunkProtection;
+  autoSaved?: boolean;
   error?: string;
 }
