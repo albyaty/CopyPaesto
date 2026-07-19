@@ -11,6 +11,7 @@
     "dev:relay": "npm run dev -w @copypaesto/relay",
     "build": "npm run build -w @copypaesto/web",
     "check": "npm run check -w @copypaesto/web && npm run check -w @copypaesto/relay",
+    "test:protocol": "node --experimental-strip-types scripts/test-file-protocol.mjs",
     "test:relay": "node scripts/test-relay.mjs",
     "benchmark:relay": "node scripts/benchmark-relay.mjs",
     "deploy:relay": "npm run deploy -w @copypaesto/relay"

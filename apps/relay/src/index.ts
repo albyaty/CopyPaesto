@@ -629,12 +629,17 @@ export class ClipboardRoom extends DurableObject<Env> {
     }
 
     const bytes = new Uint8Array(message);
+    const version = bytes[0];
     const targetLength = bytes[1] ?? 0;
+    const payloadLength = bytes.length - 2 - targetLength;
+    const minimumPayloadLength = version === 1
+      ? 12 + 16 + 1 + 1 + 8 + 1
+      : 1 + 1 + 8 + 1;
     if (
-      bytes[0] !== 1 ||
+      (version !== 1 && version !== 2) ||
       !targetLength ||
       targetLength > MAX_CLIENT_ID_BYTES ||
-      bytes.length <= 2 + targetLength + 12 + 16
+      payloadLength < minimumPayloadLength
     ) {
       socket.send(JSON.stringify({ type: "error", message: "Invalid file chunk" }));
       return;
@@ -652,12 +657,12 @@ export class ClipboardRoom extends DurableObject<Env> {
 
     const source = new TextEncoder().encode(sender.clientId);
     if (!source.length || source.length > MAX_CLIENT_ID_BYTES) return;
-    const encryptedPayload = bytes.subarray(2 + targetLength);
-    const forwarded = new Uint8Array(2 + source.length + encryptedPayload.length);
-    forwarded[0] = 1;
+    const routedPayload = bytes.subarray(2 + targetLength);
+    const forwarded = new Uint8Array(2 + source.length + routedPayload.length);
+    forwarded[0] = version;
     forwarded[1] = source.length;
     forwarded.set(source, 2);
-    forwarded.set(encryptedPayload, 2 + source.length);
+    forwarded.set(routedPayload, 2 + source.length);
 
     for (const peer of this.ctx.getWebSockets()) {
       if (this.attachment(peer)?.clientId === targetId) {
