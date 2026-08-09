@@ -48,6 +48,30 @@ An attacker who guesses an active 5-digit code can create a visible approval req
 
 Direct WebRTC remains DTLS-protected regardless of which fallback mode is selected.
 
+## Offline direct edition
+
+`apps/direct` is isolated from the room, pairing, and Worker protocols above.
+It exchanges WebRTC offer and answer payloads manually and has no CopyPaesto
+backend.
+
+- A random 256-bit bearer secret is included in each invitation.
+- The recipient's answer is authenticated with HMAC-SHA-256 before the sender
+  applies it.
+- Both pages derive and display the same 48-bit verification value. Compare it
+  through the conversation used to exchange the invitation when impersonation
+  is a concern.
+- The invitation records a fixed six-hour lifetime. With no backend, browser
+  clocks enforce the expiration; this is not a server-attested timestamp.
+- File bytes use WebRTC's DTLS-protected data channel. The app verifies the
+  received byte count before reporting completion.
+- Public STUN servers can observe IP metadata and timing but do not relay file
+  bytes. Direct peers learn route information about one another.
+- There is no TURN fallback. A failed direct route stops rather than silently
+  sending bytes through infrastructure.
+- Invitation and answer codes are secrets. Anyone holding an unexpired
+  invitation can prepare an answer, although the sender still chooses which
+  single answer to accept and must press **Send**.
+
 ## Trusted auto-save
 
 - Auto-save is disabled by default and configured separately on each receiving device.

@@ -3,9 +3,28 @@
 CopyPaesto is a shared clipboard and large-file bridge for up to eight trusted devices.
 
 - Live app: <https://albyaty.github.io/CopyPaesto/>
+- Offline direct edition: [`apps/direct/release/CopyPaesto-Direct.html`](apps/direct/release/CopyPaesto-Direct.html)
 - Relay health: <https://copypaesto-relay.albyaty.workers.dev/health>
 
 The interface is published on GitHub Pages. A Cloudflare Worker and two SQLite-backed Durable Objects handle temporary pairing, encrypted clipboard state, signaling, and file fallback routing.
+
+## Offline direct edition
+
+`apps/direct` is a separate, self-contained transfer app for users who cannot
+reliably reach GitHub or Cloudflare and do not want a hosting account. The
+sender distributes one 47 KB HTML file through a channel the recipients
+already use. It runs locally and never contacts GitHub, the CopyPaesto Worker,
+or a file-storage service.
+
+The sender chooses a file before the recipient arrives, shares a six-hour
+invitation, and pastes the recipient's answer. Opening an invitation does not
+consume it. File bytes travel directly over encrypted WebRTC; only free STUN
+discovery is used. Because this edition has no TURN or WebSocket relay, some
+remote NAT/firewall combinations cannot connect. Same-Wi-Fi transfers are the
+most reliable.
+
+See [`apps/direct/README.md`](apps/direct/README.md) for the exact workflow,
+mobile/macOS support, privacy model, and network limitations.
 
 ## Current MVP
 
@@ -78,6 +97,9 @@ npm run test:relay
 npm run benchmark:relay
 npm run dev:web
 npm run dev:relay
+npm run dev:direct
+npm run test:direct
+npm run build:direct
 ```
 
 `npm run test:protocol` verifies legacy AES-GCM integrity and Turbo frame parsing. `npm run test:relay` covers multiple devices joining through short-code approval, ECDH credential handoff, room authentication, three-device clipboard routing, signaling, and both binary protocol versions. `npm run benchmark:relay` measures the production 512 KiB path; set `BENCHMARK_PROTECTION=e2e` or `BENCHMARK_PROTECTION=transport` to compare encryption overhead with Turbo.
