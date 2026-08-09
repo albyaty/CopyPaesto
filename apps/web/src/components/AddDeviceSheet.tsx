@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { copyText } from "../lib/clipboard";
 import {
   approvePairing,
   createPairing,
@@ -10,6 +11,7 @@ import {
   type PairingIdentity,
   type PendingPairingRequest,
 } from "../lib/pairing";
+import { pairingInviteUrl } from "../lib/session";
 
 interface AddDeviceSheetProps {
   clientId: string;
@@ -34,7 +36,7 @@ export function AddDeviceSheet({
   const [approvedName, setApprovedName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<"code" | "link" | null>(null);
   const startedRef = useRef(false);
   const activeRef = useRef(true);
 
@@ -88,9 +90,16 @@ export function AddDeviceSheet({
 
   const copyCode = async () => {
     if (!invitation) return;
-    await navigator.clipboard.writeText(invitation.pairing.code);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1_400);
+    await copyText(invitation.pairing.code);
+    setCopied("code");
+    window.setTimeout(() => setCopied(null), 1_400);
+  };
+
+  const copyLink = async () => {
+    if (!invitation) return;
+    await copyText(pairingInviteUrl(invitation.pairing.code));
+    setCopied("link");
+    window.setTimeout(() => setCopied(null), 1_400);
   };
 
   const approve = async () => {
@@ -149,7 +158,7 @@ export function AddDeviceSheet({
         <button className="sheet-close" onClick={onClose} aria-label="Close">×</button>
         <span className="step-number">ADD A DEVICE</span>
         <h2>Bring another device in</h2>
-        <p>Open CopyPaesto there, choose “Join with a 5-digit code,” then approve its name here.</p>
+        <p>Send the invitation link to the other device, then approve its name here.</p>
 
         {!invitation && !error && (
           <div className="pairing-wait invite-loading"><i /><span>Creating a fresh invitation…</span></div>
@@ -162,9 +171,15 @@ export function AddDeviceSheet({
                 <span key={`${digit}-${index}`}>{digit}</span>
               ))}
             </div>
-            <button className="copy-pairing-code" onClick={() => void copyCode()}>
-              {copied ? "Copied" : "Copy code"}
-            </button>
+            <div className="pairing-share-actions">
+              <button className="copy-invite-link" type="button" onClick={() => void copyLink()}>
+                {copied === "link" ? "Link copied" : "Copy invite link"}
+              </button>
+              <button className="copy-pairing-code" type="button" onClick={() => void copyCode()}>
+                {copied === "code" ? "Code copied" : "Copy code only"}
+              </button>
+            </div>
+            <p className="pairing-share-note">The link opens this temporary, host-approved invitation.</p>
 
             {pending ? (
               <div className="approval-request invite-approval">

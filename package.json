@@ -11,9 +11,13 @@
     "dev:relay": "npm run dev -w @copypaesto/relay",
     "build": "npm run build -w @copypaesto/web",
     "check": "npm run check -w @copypaesto/web && npm run check -w @copypaesto/relay",
+    "test:invite": "node --experimental-strip-types scripts/test-invite-links.mjs",
     "test:protocol": "node --experimental-strip-types scripts/test-file-protocol.mjs",
     "test:relay": "node scripts/test-relay.mjs",
     "benchmark:relay": "node scripts/benchmark-relay.mjs",
+    "dev:access": "npm run dev:access -w @copypaesto/web",
+    "build:access": "npm run build:access -w @copypaesto/web",
+    "deploy:access": "npm run build:access && wrangler deploy --config apps/web/wrangler.access.jsonc",
     "deploy:relay": "npm run deploy -w @copypaesto/relay"
   },
   "devDependencies": {

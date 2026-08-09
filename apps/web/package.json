@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
+    "dev:access": "vite --host 0.0.0.0 --mode access",
     "build": "tsc -b && vite build",
+    "build:access": "tsc -b && vite build --mode access",
     "check": "tsc -b --pretty false"
   },
   "dependencies": {

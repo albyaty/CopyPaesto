@@ -3,6 +3,7 @@ import { AddDeviceSheet } from "./components/AddDeviceSheet";
 import { useAutoSaveFolder } from "./hooks/useAutoSaveFolder";
 import { useFileTransfer } from "./hooks/useFileTransfer";
 import { useRoom } from "./hooks/useRoom";
+import { copyText } from "./lib/clipboard";
 import {
   approvePairing,
   createPairing,
@@ -19,12 +20,15 @@ import {
   type PendingPairingRequest,
 } from "./lib/pairing";
 import {
+  clearPairingInviteFromHash,
   generatePin,
   generateSessionCode,
   isValidPin,
   isValidPairingCode,
   isValidSessionCode,
   normalizePairingCode,
+  pairingInviteUrl,
+  readPairingInviteFromHash,
 } from "./lib/session";
 import type { ConnectionStatus, Peer, TransferItem } from "./types";
 
@@ -112,10 +116,6 @@ function getDeviceName() {
   }
 }
 
-function copyText(value: string) {
-  return navigator.clipboard.writeText(value);
-}
-
 function BrandMark() {
   return (
     <div className="brand" aria-label="CopyPaesto">
@@ -156,15 +156,19 @@ interface JoinPairingState {
 }
 
 function Onboarding({ onEnter }: { onEnter: (session: SessionState, deviceName: string) => void }) {
-  const [mode, setMode] = useState<"choice" | "join" | "host" | "joining">("choice");
-  const [pairingCode, setPairingCode] = useState("");
+  const [initialInviteCode] = useState(readPairingInviteFromHash);
+  const [mode, setMode] = useState<"choice" | "join" | "host" | "joining">(
+    initialInviteCode ? "join" : "choice",
+  );
+  const [pairingCode, setPairingCode] = useState(initialInviteCode);
+  const [openedFromInvite, setOpenedFromInvite] = useState(Boolean(initialInviteCode));
   const [deviceName, setDeviceName] = useState(getDeviceName);
   const [hostState, setHostState] = useState<HostPairingState | null>(null);
   const [joinState, setJoinState] = useState<JoinPairingState | null>(null);
   const [pendingRequest, setPendingRequest] = useState<PendingPairingRequest | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<"code" | "link" | null>(null);
 
   const persistDeviceName = () => {
     const clean = deviceName.trim() || "My computer";
@@ -177,7 +181,9 @@ function Onboarding({ onEnter }: { onEnter: (session: SessionState, deviceName: 
   };
 
   const backToChoice = () => {
+    clearPairingInviteFromHash();
     setMode("choice");
+    setOpenedFromInvite(false);
     setHostState(null);
     setJoinState(null);
     setPendingRequest(null);
@@ -288,7 +294,10 @@ function Onboarding({ onEnter }: { onEnter: (session: SessionState, deviceName: 
             joinState.pairing.requestId,
             result.envelope,
           );
-          if (!stopped) onEnter({ ...session, createdHere: false }, joinState.deviceName);
+          if (!stopped) {
+            clearPairingInviteFromHash();
+            onEnter({ ...session, createdHere: false }, joinState.deviceName);
+          }
           return;
         }
         if (result.status === "rejected") {
@@ -303,6 +312,8 @@ function Onboarding({ onEnter }: { onEnter: (session: SessionState, deviceName: 
           const message = cause instanceof Error ? cause.message : "Pairing stopped";
           setError(message);
           if (/expired|not found/i.test(message)) {
+            clearPairingInviteFromHash();
+            setOpenedFromInvite(false);
             setJoinState(null);
             setMode("join");
           } else {
@@ -363,8 +374,15 @@ function Onboarding({ onEnter }: { onEnter: (session: SessionState, deviceName: 
   const copyPairingCode = async () => {
     if (!hostState) return;
     await copyText(hostState.pairing.code);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1_400);
+    setCopied("code");
+    window.setTimeout(() => setCopied(null), 1_400);
+  };
+
+  const copyPairingLink = async () => {
+    if (!hostState) return;
+    await copyText(pairingInviteUrl(hostState.pairing.code));
+    setCopied("link");
+    window.setTimeout(() => setCopied(null), 1_400);
   };
 
   return (
@@ -417,10 +435,18 @@ function Onboarding({ onEnter }: { onEnter: (session: SessionState, deviceName: 
 
           {mode === "join" && (
             <form className="entry-content enter-animation" onSubmit={requestToJoin}>
-              <button className="back-action" type="button" onClick={backToChoice}>← Back</button>
-              <span className="step-number">JOINING DEVICE</span>
-              <h2>Enter five digits</h2>
-              <p>Use the code visible on the first computer. Nothing else to type.</p>
+              <button className="back-action" type="button" onClick={backToChoice}>
+                ← {openedFromInvite ? "Cancel invitation" : "Back"}
+              </button>
+              <span className="step-number">{openedFromInvite ? "INVITATION LINK" : "JOINING DEVICE"}</span>
+              <h2>{openedFromInvite ? "Join this device" : "Enter five digits"}</h2>
+              <p>{openedFromInvite
+                ? "Confirm this computer’s name, then ask the inviting device to approve it."
+                : "Use the code visible on the first computer. Nothing else to type."}</p>
+
+              {openedFromInvite && (
+                <div className="invite-link-ready"><i /> Invitation loaded · host approval required</div>
+              )}
 
               <label className="field-label" htmlFor="pairing-code">Pairing code</label>
               <input
@@ -459,9 +485,15 @@ function Onboarding({ onEnter }: { onEnter: (session: SessionState, deviceName: 
               <div className="pairing-code-display" aria-label={`Pairing code ${hostState.pairing.code}`}>
                 {[...hostState.pairing.code].map((digit, index) => <span key={`${digit}-${index}`}>{digit}</span>)}
               </div>
-              <button className="copy-pairing-code" onClick={() => void copyPairingCode()}>
-                {copied ? "Copied" : "Copy code"}
-              </button>
+              <div className="pairing-share-actions">
+                <button className="copy-invite-link" type="button" onClick={() => void copyPairingLink()}>
+                  {copied === "link" ? "Link copied" : "Copy invite link"}
+                </button>
+                <button className="copy-pairing-code" type="button" onClick={() => void copyPairingCode()}>
+                  {copied === "code" ? "Code copied" : "Copy code only"}
+                </button>
+              </div>
+              <p className="pairing-share-note">Send the link to the other device, then approve its name here.</p>
 
               {pendingRequest ? (
                 <div className="approval-request">
@@ -964,12 +996,14 @@ function Workspace({ session, deviceName, remembered, onLeave }: {
 }
 
 export default function App() {
-  const [restoredSession] = useState(readRememberedSession);
+  const [openedInvite] = useState(readPairingInviteFromHash);
+  const [restoredSession] = useState(() => openedInvite ? null : readRememberedSession());
   const [session, setSession] = useState<SessionState | null>(() => restoredSession?.session ?? null);
   const [deviceName, setDeviceName] = useState(() => restoredSession?.deviceName ?? getDeviceName());
   const [remembered, setRemembered] = useState(() => Boolean(restoredSession));
 
   const enter = (next: SessionState, name: string) => {
+    clearPairingInviteFromHash();
     setDeviceName(name);
     setRemembered(rememberSession(next, name));
     setSession(next);

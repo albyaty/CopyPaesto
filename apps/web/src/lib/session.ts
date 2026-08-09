@@ -1,5 +1,6 @@
 const SESSION_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 const SESSION_LENGTH = 12;
+const INVITE_HASH_KEY = "invite";
 
 function randomInt(max: number) {
   const limit = Math.floor(0x1_0000_0000 / max) * max;
@@ -54,8 +55,41 @@ export function isValidPairingCode(value: string) {
   return /^\d{5}$/.test(value);
 }
 
+function hashParams() {
+  return new URLSearchParams(window.location.hash.replace(/^#/, ""));
+}
+
+export function readPairingInviteFromHash() {
+  const code = normalizePairingCode(hashParams().get(INVITE_HASH_KEY) ?? "");
+  return isValidPairingCode(code) ? code : "";
+}
+
+export function pairingInviteUrl(code: string) {
+  const normalized = normalizePairingCode(code);
+  if (!isValidPairingCode(normalized)) throw new Error("Invalid pairing code");
+
+  const url = new URL(window.location.href);
+  const params = new URLSearchParams(url.hash.replace(/^#/, ""));
+  params.delete("session");
+  params.set(INVITE_HASH_KEY, normalized);
+  url.hash = params.toString();
+  return url.toString();
+}
+
+export function clearPairingInviteFromHash() {
+  const params = hashParams();
+  if (!params.has(INVITE_HASH_KEY)) return;
+  params.delete(INVITE_HASH_KEY);
+  const hash = params.toString();
+  window.history.replaceState(
+    null,
+    "",
+    `${window.location.pathname}${window.location.search}${hash ? `#${hash}` : ""}`,
+  );
+}
+
 export function readSessionFromHash() {
-  const params = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  const params = hashParams();
   const value = params.get("session") ?? "";
   return isValidSessionCode(value) ? formatSessionCode(value) : "";
 }

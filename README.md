@@ -3,6 +3,7 @@
 CopyPaesto is a shared clipboard and large-file bridge for up to eight trusted devices.
 
 - Live app: <https://albyaty.github.io/CopyPaesto/>
+- GitHub-independent app: <https://copypaesto-access.albyaty.workers.dev/>
 - Relay health: <https://copypaesto-relay.albyaty.workers.dev/health>
 
 The interface is published on GitHub Pages. A Cloudflare Worker and two SQLite-backed Durable Objects handle temporary pairing, encrypted clipboard state, signaling, and file fallback routing.
@@ -10,6 +11,7 @@ The interface is published on GitHub Pages. A Cloudflare Worker and two SQLite-b
 ## Current MVP
 
 - Pair devices with a random 5-digit invitation and an approval on an already-connected device.
+- Copy a temporary invitation link that opens the approved pairing flow on the receiving device.
 - After approval, that browser profile remembers the room across closed tabs and browser or device restarts until **Leave** is confirmed.
 - Keep up to eight devices in one live room; clipboard changes reach all of them and files can target one device or every other connected device.
 - The high-entropy room identifier and encryption secret never appear in the interface.
@@ -118,6 +120,26 @@ Short-lived TURN credentials are issued only after the client proves it belongs 
    ```
 
 3. Push to `main`. `.github/workflows/pages.yml` builds and deploys the interface.
+
+## Publish the GitHub-independent interface
+
+The alternate frontend is a separate Cloudflare Static Assets Worker named
+`copypaesto-access`. It points to the existing relay but does not deploy or modify that
+relay, its Durable Objects, or the GitHub Pages site.
+
+```bash
+npx wrangler whoami
+npm run build:access
+npm run deploy:access
+```
+
+The access build reads `apps/web/.env.access`, which currently targets the production
+relay. Invitation links use a URL fragment such as `#invite=12345`, so the temporary
+pairing code is handled by the browser rather than sent with the page request. Host
+approval is still required and the invitation still expires after 10 minutes.
+
+For a stable public address, attach a custom domain to `copypaesto-access` in Cloudflare.
+Users of this interface do not contact GitHub to load the application or transfer files.
 
 ## Browser clipboard limitation
 
