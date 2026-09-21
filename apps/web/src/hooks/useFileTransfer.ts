@@ -45,6 +45,7 @@ type ControlMessage =
   | { type: "ack"; received: number }
   | { type: "resume-request" }
   | { type: "resume-at"; received: number }
+  | { type: "cancel" }
   | { type: "eof" }
   | { type: "complete" }
   | { type: "transfer-error"; message: string };
@@ -291,6 +292,37 @@ export function useFileTransfer({
     notifyFlow(session);
   }, [notifyFlow, sendSessionControl, updateTransfer]);
 
+  const cancelSession = useCallback((
+    session: TransferSession,
+    notifyPeer: boolean,
+    cancelledByPeer = false,
+  ) => {
+    if (session.closed || session.completed) return;
+    session.closed = true;
+    session.resumeGeneration += 1;
+    window.clearTimeout(session.fallbackTimer);
+    window.clearTimeout(session.flushTimer);
+    updateTransfer(session.id, {
+      status: "cancelled",
+      bytesPerSecond: 0,
+      error: cancelledByPeer ? `${session.peerName} stopped this transfer.` : undefined,
+    });
+    notifyFlow(session);
+    void session.writable?.abort?.("Transfer cancelled").catch(() => undefined);
+
+    const closeTransport = () => {
+      session.channel?.close();
+      session.pc?.close();
+    };
+    if (notifyPeer) {
+      void sendSessionControl(session, { type: "cancel" })
+        .catch(() => undefined)
+        .finally(() => window.setTimeout(closeTransport, 100));
+    } else {
+      closeTransport();
+    }
+  }, [notifyFlow, sendSessionControl, updateTransfer]);
+
   const beginRelayRecovery = useCallback((session: TransferSession, restart: boolean) => {
     if (session.closed || session.transport !== "relay") return false;
     if (!session.recovering) {
@@ -316,6 +348,7 @@ export function useFileTransfer({
     }
     return {
       transferred,
+      lastProgressAt: Date.now(),
       bytesPerSecond: session.bytesPerSecond,
       relayBufferedBytes: session.relayBufferedBytes,
       writeLatencyMs: session.writeLatencyMs,
@@ -580,12 +613,15 @@ export function useFileTransfer({
       session.offer = message;
       setTransfers((current) => {
         if (current.some((item) => item.id === session.id)) return current;
+        const now = Date.now();
         return [{
           id: session.id,
           direction: "receive",
           name: message.name,
           size: message.size,
           transferred: 0,
+          startedAt: now,
+          lastProgressAt: now,
           status: "offered",
           peerName: session.peerName,
           ...(session.transport === "relay" ? { relayProtection: session.relayProtection } : {}),
@@ -640,6 +676,11 @@ export function useFileTransfer({
       return;
     }
 
+    if (message.type === "cancel") {
+      cancelSession(session, false, true);
+      return;
+    }
+
     if (message.type === "resume-at" && session.direction === "send") {
       const size = session.file?.size ?? 0;
       if (!isValidResumePosition(session.acked, session.sent, size, message.received)) {
@@ -682,7 +723,7 @@ export function useFileTransfer({
     }
 
     if (message.type === "transfer-error") failSession(session, message.message, false);
-  }, [acceptSession, createAutoSaveTarget, failSession, finishReceiver, notifyFlow, progressPatch, sendFileData, updateTransfer]);
+  }, [acceptSession, cancelSession, createAutoSaveTarget, failSession, finishReceiver, notifyFlow, progressPatch, sendFileData, updateTransfer]);
 
   const fallbackToRelay = useCallback(async (session: TransferSession) => {
     if (session.closed || session.transport === "relay" || session.direction !== "send" || !session.file) return;
@@ -706,6 +747,7 @@ export function useFileTransfer({
     updateTransfer(session.id, {
       status: "connecting",
       transferred: 0,
+      lastProgressAt: Date.now(),
       relayProtection: session.relayProtection,
       error: undefined,
     });
@@ -945,12 +987,15 @@ export function useFileTransfer({
       };
       sessionsRef.current.set(session.id, session);
       setTransfers((current) => {
+        const now = Date.now();
         const item: TransferItem = {
           id: session.id,
           direction: "receive",
           name: offer.name,
           size: offer.size,
           transferred: 0,
+          startedAt: now,
+          lastProgressAt: now,
           status: "offered",
           peerName,
           relayProtection,
@@ -1005,6 +1050,7 @@ export function useFileTransfer({
       decline: { type: "decline" },
       pause: { type: "pause" },
       resume: { type: "resume" },
+      cancel: { type: "cancel" },
       eof: { type: "eof" },
       complete: { type: "complete" },
     };
@@ -1227,12 +1273,15 @@ export function useFileTransfer({
 
     for (const file of files) {
       const id = crypto.randomUUID();
+      const now = Date.now();
       setTransfers((current) => [{
         id,
         direction: "send",
         name: file.name,
         size: file.size,
         transferred: 0,
+        startedAt: now,
+        lastProgressAt: now,
         status: "connecting",
         peerName: peer.name,
       }, ...current]);
@@ -1281,6 +1330,12 @@ export function useFileTransfer({
     if (!session.paused) notifyFlow(session);
   }, [notifyFlow, sendSessionControl, updateTransfer]);
 
+  const cancelTransfer = useCallback((id: string) => {
+    const session = sessionsRef.current.get(id);
+    if (!session) return;
+    cancelSession(session, true);
+  }, [cancelSession]);
+
   return {
     transfers,
     relayAvailable: true,
@@ -1290,5 +1345,6 @@ export function useFileTransfer({
     acceptTransfer,
     declineTransfer,
     togglePause,
+    cancelTransfer,
   };
 }

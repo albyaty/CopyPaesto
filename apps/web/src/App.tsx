@@ -514,6 +514,20 @@ function formatBytes(bytes: number) {
   return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
 }
 
+function formatDuration(totalSeconds: number) {
+  const seconds = Math.max(0, Math.floor(totalSeconds));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
+function formatPercent(percent: number) {
+  if (percent > 0 && percent < 1) return `${percent.toFixed(1)}%`;
+  return `${Math.floor(percent)}%`;
+}
+
 function transferLabel(item: TransferItem) {
   const labels: Record<TransferItem["status"], string> = {
     connecting: `Connecting to ${item.peerName}…`,
@@ -527,6 +541,7 @@ function transferLabel(item: TransferItem) {
     finishing: `Finishing with ${item.peerName}…`,
     complete: `Complete with ${item.peerName}`,
     declined: item.direction === "send" ? `${item.peerName} declined` : "Declined",
+    cancelled: "Transfer cancelled",
     failed: "Transfer stopped",
   };
   return labels[item.status];
@@ -617,28 +632,104 @@ function TransferRow({
   onAccept,
   onDecline,
   onPause,
+  onCancel,
 }: {
   item: TransferItem;
   onAccept: () => void;
   onDecline: () => void;
   onPause: () => void;
+  onCancel: () => void;
 }) {
+  const activeStatuses: TransferItem["status"][] = [
+    "connecting",
+    "waiting",
+    "transferring",
+    "reconnecting",
+    "paused",
+    "finishing",
+  ];
+  const active = activeStatuses.includes(item.status);
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+
   const percent = item.size ? Math.min(100, (item.transferred / item.size) * 100) : 0;
   const canPause = item.status === "transferring" || item.status === "paused";
+  const canCancel = active;
+  const secondsWithoutProgress = Math.max(0, (now - item.lastProgressAt) / 1_000);
+  const stalled = item.status === "transferring" && secondsWithoutProgress >= 5;
+  const speedIsFresh = item.status === "transferring" && secondsWithoutProgress < 3;
+  const speed = speedIsFresh ? item.bytesPerSecond ?? 0 : 0;
+  const remainingSeconds = speed > 0 ? (item.size - item.transferred) / speed : 0;
+  const elapsedSeconds = Math.max(0, (now - item.startedAt) / 1_000);
+  const showProgress = item.status !== "offered" && item.status !== "declined";
   const route = item.relayProtection === "transport"
     ? "Turbo relay"
     : item.relayProtection === "e2e"
       ? "Encrypted relay"
       : "Direct";
+  const stateLabel = (() => {
+    if (stalled) return `No data · ${formatDuration(secondsWithoutProgress)}`;
+    const labels: Record<TransferItem["status"], string> = {
+      connecting: "Connecting",
+      offered: "Ready",
+      waiting: "Awaiting approval",
+      transferring: item.transferred ? "Active" : "Starting",
+      reconnecting: `Reconnecting · ${formatDuration(secondsWithoutProgress)}`,
+      paused: "Paused",
+      finishing: "Verifying",
+      complete: "Complete",
+      declined: "Declined",
+      cancelled: "Stopped",
+      failed: "Failed",
+    };
+    return labels[item.status];
+  })();
+  const stateTone = stalled
+    ? "stalled"
+    : item.status === "transferring"
+      ? "active"
+      : item.status === "complete"
+        ? "complete"
+        : item.status === "failed" || item.status === "cancelled" || item.status === "declined"
+          ? "stopped"
+          : item.status === "reconnecting"
+            ? "recovering"
+            : "idle";
   return (
-    <div className={`transfer-row transfer-${item.status}`}>
+    <div className={`transfer-row transfer-${item.status} ${stalled ? "is-stalled" : ""}`}>
       <div className="file-glyph"><FileIcon /></div>
       <div className="transfer-info">
-        <strong title={item.name}>{item.name}</strong>
-        <span>{transferLabel(item)} · {formatBytes(item.size)} · {route}{item.bytesPerSecond ? ` · ${formatBytes(item.bytesPerSecond)}/s` : ""}{item.autoSaved ? " · Auto-save" : ""}</span>
+        <div className="transfer-heading">
+          <strong title={item.name}>{item.name}</strong>
+          <span className={`transfer-state is-${stateTone}`}><i />{stateLabel}</span>
+        </div>
+        <span className="transfer-summary">{transferLabel(item)} · {route}{item.autoSaved ? " · Auto-save" : ""}</span>
         {item.error && <em>{item.error}</em>}
-        {!['offered', 'waiting', 'declined', 'failed'].includes(item.status) && (
-          <div className="progress-track"><i style={{ width: `${percent}%` }} /></div>
+        {showProgress && (
+          <div className="transfer-progress">
+            <div className="transfer-progress-copy">
+              <strong>{formatPercent(percent)}</strong>
+              <span>{formatBytes(item.transferred)} of {formatBytes(item.size)}</span>
+            </div>
+            <div
+              className="progress-track"
+              role="progressbar"
+              aria-label={`${item.name} transfer progress`}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(percent)}
+              aria-valuetext={`${formatPercent(percent)}, ${formatBytes(item.transferred)} of ${formatBytes(item.size)}`}
+            ><i style={{ width: `${percent}%` }} /></div>
+            <div className="transfer-metrics">
+              <span><strong>{speed > 0 ? `${formatBytes(speed)}/s` : item.status === "transferring" ? "0 B/s" : "—"}</strong><small>Speed</small></span>
+              <span><strong>{remainingSeconds > 0 ? formatDuration(remainingSeconds) : "—"}</strong><small>Remaining</small></span>
+              <span><strong>{formatDuration(elapsedSeconds)}</strong><small>Elapsed</small></span>
+            </div>
+          </div>
         )}
       </div>
       {item.status === "offered" && (
@@ -647,7 +738,12 @@ function TransferRow({
           <button onClick={onDecline}>Decline</button>
         </div>
       )}
-      {canPause && <button className="pause-button" onClick={onPause}>{item.status === "paused" ? "Resume" : "Pause"}</button>}
+      {item.status !== "offered" && (canPause || canCancel) && (
+        <div className="transfer-actions">
+          {canPause && <button className="pause-button" onClick={onPause}>{item.status === "paused" ? "Resume" : "Pause"}</button>}
+          {canCancel && <button className="stop-button" onClick={onCancel} aria-label={`Stop transfer of ${item.name}`}>Stop</button>}
+        </div>
+      )}
     </div>
   );
 }
@@ -932,6 +1028,7 @@ function Workspace({ session, deviceName, remembered, onLeave }: {
                 onAccept={() => void files.acceptTransfer(item.id)}
                 onDecline={() => files.declineTransfer(item.id)}
                 onPause={() => files.togglePause(item.id)}
+                onCancel={() => files.cancelTransfer(item.id)}
               />
             )) : (
               <div className="empty-transfers">No transfers in this session</div>

@@ -39,6 +39,7 @@ export type RelayFilePayload =
   | { kind: "resume-at"; transferId: string; received: number }
   | { kind: "pause"; transferId: string }
   | { kind: "resume"; transferId: string }
+  | { kind: "cancel"; transferId: string }
   | { kind: "eof"; transferId: string }
   | { kind: "complete"; transferId: string }
   | { kind: "error"; transferId: string; message: string };
@@ -72,6 +73,7 @@ export type TransferStatus =
   | "finishing"
   | "complete"
   | "declined"
+  | "cancelled"
   | "failed";
 
 export interface TransferItem {
@@ -80,6 +82,8 @@ export interface TransferItem {
   name: string;
   size: number;
   transferred: number;
+  startedAt: number;
+  lastProgressAt: number;
   status: TransferStatus;
   peerName: string;
   relayProtection?: RelayChunkProtection;
