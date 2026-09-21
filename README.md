@@ -39,7 +39,7 @@ mobile/macOS support, privacy model, and network limitations.
 - Files try a direct WebRTC data channel first, then automatically switch to a Worker relay when the networks cannot connect directly.
 - If direct WebRTC is blocked, files automatically use the faster **Turbo** fallback protected by WSS/TLS.
 - An **All devices** send creates an independent transfer for each recipient, so everyone gets Save/Decline and one slow device cannot block the others.
-- Direct transfers use 32 KiB data-channel chunks. Both fallback modes use 512 KiB binary WebSocket frames, pause/resume, and a bounded 32 MiB relay window.
+- Direct transfers use 32 KiB data-channel chunks. Both fallback modes use 512 KiB binary WebSocket frames, pause/resume, a bounded 32 MiB acknowledgement window, and a bounded 4 MiB browser WebSocket queue.
 - Chrome and Edge stream incoming large files directly to disk. A trusted device can authorize one auto-save folder and receive later files there without clicking Save.
 - Rooms delete their encrypted relay state after 24 hours. A remembered browser can reconnect to the same empty room without pairing again.
 
@@ -57,9 +57,9 @@ GitHub Pages
 
 The relay cannot read clipboard text, room secrets, file names, or transfer controls. Turbo intentionally lets the Worker see bulk file bytes to avoid browser encryption overhead; a corporate TLS-inspecting proxy may see them too. The older end-to-end encrypted chunk protocol remains supported invisibly so open tabs from an earlier release still work during upgrades.
 
-## Handling a 1 GB file
+## Handling multi-gigabyte files
 
-CopyPaesto does not load a 1 GB file into memory. On the fallback route, the sender reads 512 KiB at a time and stops when roughly 32 MiB is waiting for acknowledgement. The receiver writes chunks to the selected destination as they arrive. Direct WebRTC transfers retain smaller 32 KiB data-channel chunks and a 4 MiB window.
+CopyPaesto does not load a multi-gigabyte file into memory. On the fallback route, the sender reads 512 KiB at a time, keeps the browser's outgoing WebSocket queue near 4 MiB, and stops when roughly 32 MiB is waiting for acknowledgement. The receiver combines incoming frames into writes of up to 2 MiB and acknowledges only bytes successfully written to the selected destination. Direct WebRTC transfers retain smaller 32 KiB data-channel chunks and a 4 MiB window.
 
 The route is selected automatically:
 
@@ -74,7 +74,7 @@ Sending to all devices opens a separate direct or Turbo route to each recipient.
 
 Trusted auto-save still requires one deliberate browser action: choose a destination folder and grant write permission on each receiving device. CopyPaesto stores the folder handle in that browser. If the browser drops permission after a restart, click **Turn on** once to reconnect it. Incoming name collisions receive a numbered name instead of overwriting an existing file.
 
-Interrupted transfers currently restart from the beginning. A future offline/resumable mode can use client-encrypted R2 multipart uploads with expiring objects.
+A transient Turbo disconnection resumes from the receiver's last successfully written byte while both tabs remain open. Closing or refreshing either tab still restarts the transfer from the beginning. A future offline-resumable mode can use client-encrypted R2 multipart uploads with expiring objects.
 
 ## Local development
 
@@ -102,7 +102,7 @@ npm run test:direct
 npm run build:direct
 ```
 
-`npm run test:protocol` verifies legacy AES-GCM integrity and Turbo frame parsing. `npm run test:relay` covers multiple devices joining through short-code approval, ECDH credential handoff, room authentication, three-device clipboard routing, signaling, and both binary protocol versions. `npm run benchmark:relay` measures the production 512 KiB path; set `BENCHMARK_PROTECTION=e2e` or `BENCHMARK_PROTECTION=transport` to compare encryption overhead with Turbo.
+`npm run test:protocol` verifies legacy AES-GCM integrity, Turbo frame parsing, resume checkpoint bounds, duplicate replay handling, batched writes, and WebSocket backpressure. `npm run test:relay` covers multiple devices joining through short-code approval, ECDH credential handoff, room authentication, three-device clipboard routing, signaling, both binary protocol versions, and routing after a forced disconnect. `npm run benchmark:relay` measures the production 512 KiB path with the browser's queue and acknowledgement limits; set `BENCHMARK_PROTECTION=e2e` or `BENCHMARK_PROTECTION=transport` to compare encryption overhead with Turbo, and `BENCHMARK_WRITE=true` to include temporary 2 MiB batched disk writes.
 
 ## Deploy the relay
 

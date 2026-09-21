@@ -35,6 +35,8 @@ export type RelayFilePayload =
   | { kind: "decline"; transferId: string }
   | { kind: "chunk"; transferId: string; offset: number; data: string }
   | { kind: "ack"; transferId: string; received: number }
+  | { kind: "resume-request"; transferId: string }
+  | { kind: "resume-at"; transferId: string; received: number }
   | { kind: "pause"; transferId: string }
   | { kind: "resume"; transferId: string }
   | { kind: "eof"; transferId: string }
@@ -65,6 +67,7 @@ export type TransferStatus =
   | "offered"
   | "waiting"
   | "transferring"
+  | "reconnecting"
   | "paused"
   | "finishing"
   | "complete"
@@ -81,5 +84,8 @@ export interface TransferItem {
   peerName: string;
   relayProtection?: RelayChunkProtection;
   autoSaved?: boolean;
+  bytesPerSecond?: number;
+  relayBufferedBytes?: number;
+  writeLatencyMs?: number;
   error?: string;
 }

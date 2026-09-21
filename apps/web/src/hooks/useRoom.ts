@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { decryptValue, deriveSessionCredentials, encryptValue } from "../lib/crypto";
 import { openRelayChunk, sealRelayChunk } from "../lib/fileRelay";
-import { RoomRelay, type TurnAccess } from "../lib/relay";
+import { RoomRelay, type RelaySendResult, type TurnAccess } from "../lib/relay";
 import { normalizeSessionCode } from "../lib/session";
 import type {
   ConnectionStatus,
@@ -47,7 +47,7 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
   const sendChainsRef = useRef([Promise.resolve(), Promise.resolve(), Promise.resolve()]);
   const signalChainRef = useRef(Promise.resolve());
   const signalListenersRef = useRef(new Set<(from: string, signal: SignalPayload) => void>());
-  const relayFileSendChainsRef = useRef(new Map<string, Promise<void>>());
+  const relayFileSendChainsRef = useRef(new Map<string, Promise<unknown>>());
   const relayFileReceiveChainRef = useRef(Promise.resolve());
   const relayFileListenersRef = useRef(new Set<(from: string, payload: RelayFilePayload) => void>());
   const relayChunkListenersRef = useRef(new Set<(
@@ -347,7 +347,7 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
     offset: number,
     chunk: ArrayBuffer,
     protection: RelayChunkProtection,
-  ) => {
+  ): Promise<RelaySendResult> => {
     const previous = relayFileSendChainsRef.current.get(transferId) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
@@ -355,7 +355,9 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
         const key = keyRef.current;
         if (!key || !readyRef.current) throw new Error("Session is not connected");
         const frame = await sealRelayChunk(key, to, transferId, offset, chunk, protection);
-        if (!relayRef.current?.sendBinary(frame)) throw new Error("Session is not connected");
+        const result = await relayRef.current?.sendBinary(frame);
+        if (!result) throw new Error("Session is not connected");
+        return result;
       });
     relayFileSendChainsRef.current.set(transferId, next);
     void next.finally(() => {
@@ -363,7 +365,11 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
         relayFileSendChainsRef.current.delete(transferId);
       }
     }).catch(() => undefined);
-    return next;
+    return next as Promise<RelaySendResult>;
+  }, []);
+
+  const restartRelay = useCallback(() => {
+    relayRef.current?.restart();
   }, []);
 
   const subscribeToRelayFiles = useCallback((listener: (from: string, payload: RelayFilePayload) => void) => {
@@ -396,6 +402,7 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
     sendRelayChunk,
     subscribeToRelayFiles,
     subscribeToRelayChunks,
+    restartRelay,
   }), [
     lastSyncedAt,
     peers,
@@ -408,6 +415,7 @@ export function useRoom({ sessionCode, pin, clientId, deviceName }: UseRoomOptio
     subscribeToSignals,
     subscribeToRelayFiles,
     subscribeToRelayChunks,
+    restartRelay,
     turnAccess,
     updateSlot,
   ]);

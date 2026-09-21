@@ -43,7 +43,7 @@ An attacker who guesses an active 5-digit code can create a visible approval req
 - The current interface automatically uses **Turbo fallback** when direct WebRTC is blocked. Bulk chunks are protected in transit by WSS/TLS, but are not encrypted end to end by CopyPaesto. Cloudflare—and a work network that performs trusted TLS inspection—can inspect or alter those file bytes. The five-digit code, room PIN, and approval gate access; they do not make Turbo bytes confidential from infrastructure carrying the connection.
 - The earlier AES-GCM chunk format remains accepted for rolling compatibility with open tabs from older releases, but it is no longer exposed as a transfer choice.
 - The Worker forwards file frames without storing chunks or converting them to Base64.
-- Sender acknowledgements cap outstanding fallback data at about 32 MiB.
+- Sender acknowledgements cap outstanding fallback data at about 32 MiB, and the browser also bounds its outgoing WebSocket queue near 4 MiB.
 - Optional TURN credentials are available only through a room-authenticated endpoint; the long-lived TURN key remains a Worker secret.
 
 Direct WebRTC remains DTLS-protected regardless of which fallback mode is selected.
@@ -89,7 +89,7 @@ This is not an anonymity system. Cloudflare may observe client IP metadata, conn
 - A user can mistakenly approve an impostor that guessed the active short code. Approve only the computer you are pairing at that moment.
 - Device names are user-provided labels, not cryptographic device identities.
 - The first authenticated connection registers the verifier for a newly created hidden room. The approved host connects immediately and the room locator is unguessable, but a mature service should add server-issued creation tickets.
-- Transfers do not yet resume across a browser refresh, computer sleep, or lost network. They restart from the beginning.
+- Turbo transfers resume after a transient relay or network interruption while both tabs and their file handles remain open. A browser refresh, closed tab, or browser restart still restarts the file from the beginning.
 - Incoming files over 128 MB require a browser with the streaming file-save API, currently Chrome or Edge.
 - Trusted auto-save relies on the same Chromium file-system API and cannot bypass a browser permission prompt when permission has expired.
 - Remembered sessions rely on browser local site storage and disappear if the user or browser clears that storage.

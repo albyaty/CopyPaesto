@@ -522,6 +522,7 @@ function transferLabel(item: TransferItem) {
     transferring: item.direction === "send"
       ? `Sending to ${item.peerName}`
       : `Receiving from ${item.peerName}`,
+    reconnecting: `Restoring transfer with ${item.peerName}…`,
     paused: `Paused with ${item.peerName}`,
     finishing: `Finishing with ${item.peerName}…`,
     complete: `Complete with ${item.peerName}`,
@@ -634,7 +635,7 @@ function TransferRow({
       <div className="file-glyph"><FileIcon /></div>
       <div className="transfer-info">
         <strong title={item.name}>{item.name}</strong>
-        <span>{transferLabel(item)} · {formatBytes(item.size)} · {route}{item.autoSaved ? " · Auto-save" : ""}</span>
+        <span>{transferLabel(item)} · {formatBytes(item.size)} · {route}{item.bytesPerSecond ? ` · ${formatBytes(item.bytesPerSecond)}/s` : ""}{item.autoSaved ? " · Auto-save" : ""}</span>
         {item.error && <em>{item.error}</em>}
         {!['offered', 'waiting', 'declined', 'failed'].includes(item.status) && (
           <div className="progress-track"><i style={{ width: `${percent}%` }} /></div>
@@ -675,6 +676,8 @@ function Workspace({ session, deviceName, remembered, onLeave }: {
     subscribeToRelayFiles: room.subscribeToRelayFiles,
     subscribeToRelayChunks: room.subscribeToRelayChunks,
     createAutoSaveTarget: autoSave.ready ? autoSave.createTarget : undefined,
+    connectionStatus: room.status,
+    restartRelay: room.restartRelay,
   });
   const [activeSlot, setActiveSlot] = useState(0);
   const [showSession, setShowSession] = useState(false);

@@ -376,12 +376,63 @@ async function testRoom() {
     Buffer.from(turboPayload),
   );
 
+  third.socket.close(1000, "Simulated transfer interruption");
+  await third.closed;
+  await first.next((message) =>
+    message.type === "presence" && !message.peers.some((peer) => peer.id === "integration-c")
+  );
+
+  const resumedThird = connect(roomId, "integration-c");
+  await resumedThird.opened;
+  resumedThird.socket.send(JSON.stringify({ type: "authenticate", verifier, name: "Test C resumed" }));
+  await resumedThird.next((message) => message.type === "authenticated");
+  await resumedThird.next((message) => message.type === "snapshot");
+
+  const resumeRequestEnvelope = { v: 1, iv: "resume-request-iv", data: "resume-request-ciphertext" };
+  first.socket.send(JSON.stringify({
+    type: "file:relay",
+    to: "integration-c",
+    envelope: resumeRequestEnvelope,
+  }));
+  const resumeRequest = await resumedThird.next((message) => message.type === "file:relay");
+  assert.equal(resumeRequest.from, "integration-a");
+  assert.deepEqual(resumeRequest.envelope, resumeRequestEnvelope);
+
+  const resumeAtEnvelope = { v: 1, iv: "resume-at-iv", data: "resume-at-ciphertext" };
+  resumedThird.socket.send(JSON.stringify({
+    type: "file:relay",
+    to: "integration-a",
+    envelope: resumeAtEnvelope,
+  }));
+  const resumeAt = await first.next((message) =>
+    message.type === "file:relay" && message.from === "integration-c"
+  );
+  assert.deepEqual(resumeAt.envelope, resumeAtEnvelope);
+
+  new DataView(turboFrame.buffer).setBigUint64(
+    2 + turboTarget.length + 1 + turboTransfer.length,
+    BigInt(turboChunk.length),
+  );
+  first.socket.send(turboFrame.buffer);
+  const resumedChunk = new Uint8Array((await resumedThird.next((message) => message.type === "binary")).data);
+  const resumedSourceLength = resumedChunk[1];
+  const resumedPayload = resumedChunk.subarray(2 + resumedSourceLength);
+  const resumedTransferLength = resumedPayload[0];
+  assert.equal(
+    new DataView(
+      resumedPayload.buffer,
+      resumedPayload.byteOffset + 1 + resumedTransferLength,
+      8,
+    ).getBigUint64(0),
+    BigInt(turboChunk.length),
+  );
+
   first.socket.close(1000, "Test complete");
   second.socket.close(1000, "Test complete");
-  third.socket.close(1000, "Test complete");
+  resumedThird.socket.close(1000, "Test complete");
 }
 
 await testPairing();
 await testRoom();
 
-console.log("Relay integration passed: multi-device 5-digit approval, E2E handoff, PIN gate, three-device clipboard sync, signaling, and private/Turbo file routing.");
+console.log("Relay integration passed: pairing, E2E handoff, PIN gate, three-device sync, private/Turbo routing, and post-disconnect resume controls.");
