@@ -538,7 +538,9 @@ function transferLabel(item: TransferItem) {
       : `Receiving from ${item.peerName}`,
     reconnecting: `Restoring transfer with ${item.peerName}…`,
     paused: `Paused with ${item.peerName}`,
-    finishing: `Finishing with ${item.peerName}…`,
+    finishing: item.direction === "receive"
+      ? "100% received · saving to disk…"
+      : `${item.peerName} is saving the file…`,
     complete: `Complete with ${item.peerName}`,
     declined: item.direction === "send" ? `${item.peerName} declined` : "Declined",
     cancelled: "Transfer cancelled",
@@ -680,7 +682,7 @@ function TransferRow({
       transferring: item.transferred ? "Active" : "Starting",
       reconnecting: `Reconnecting · ${formatDuration(secondsWithoutProgress)}`,
       paused: "Paused",
-      finishing: "Verifying",
+      finishing: item.direction === "receive" ? "Saving file" : "Finalizing",
       complete: "Complete",
       declined: "Declined",
       cancelled: "Stopped",

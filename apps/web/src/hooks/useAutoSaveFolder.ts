@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { describeFileSystemError } from "../lib/fileSystemErrors";
 
 const DATABASE_NAME = "copypaesto-settings";
 const STORE_NAME = "handles";
@@ -171,7 +172,7 @@ export function useAutoSaveFolder() {
       setEnabled(true);
     } catch (cause) {
       if (cause instanceof DOMException && cause.name === "AbortError") return;
-      setError(cause instanceof Error ? cause.message : "Could not enable auto-save");
+      setError(describeFileSystemError(cause, "Could not enable auto-save"));
     } finally {
       setBusy(false);
     }
@@ -221,12 +222,20 @@ export function useAutoSaveFolder() {
       return {
         savedName,
         writable: {
-          write: (data) => stream.write(data),
+          write: async (data) => {
+            try {
+              await stream.write(data);
+            } catch (cause) {
+              throw new Error(describeFileSystemError(cause, "Could not write to the auto-save folder"));
+            }
+          },
           close: async () => {
             if (finished) return;
             finished = true;
             try {
               await stream.close();
+            } catch (cause) {
+              throw new Error(describeFileSystemError(cause, "Could not finish writing the received file", "commit"));
             } finally {
               reservedNamesRef.current.delete(savedName);
             }
@@ -246,7 +255,7 @@ export function useAutoSaveFolder() {
     } catch (cause) {
       reservedNamesRef.current.delete(savedName);
       await directory.removeEntry(savedName).catch(() => undefined);
-      throw cause;
+      throw new Error(describeFileSystemError(cause, "Could not create a file in the auto-save folder"));
     }
   }, [directory, enabled, permission]);
 

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { MAX_RELAY_CHUNK_BYTES } from "../lib/fileRelay";
 import { fetchIceServers, type RelaySendResult, type TurnAccess } from "../lib/relay";
 import { classifyIncomingChunk, combineTransferChunks, isValidResumePosition } from "../lib/transferFlow";
+import { describeFileSystemError } from "../lib/fileSystemErrors";
 import type { AutoSaveWritableTarget } from "./useAutoSaveFolder";
 import type {
   Peer,
@@ -391,7 +392,7 @@ export function useFileTransfer({
         setNotice("Trusted auto-save needs attention. You can still click Save for this file.");
         return;
       }
-      failSession(session, error instanceof Error ? error.message : "Could not create the destination file");
+      failSession(session, describeFileSystemError(error, "Could not create the destination file"));
     }
   }, [beginRelayRecovery, createAutoSaveTarget, failSession, sendSessionControl, updateTransfer]);
 
@@ -442,7 +443,7 @@ export function useFileTransfer({
         }
       }
     }).catch((error) => {
-      failSession(session, error instanceof Error ? error.message : "Could not write the file");
+      failSession(session, describeFileSystemError(error, "Could not write the file"));
     });
     return session.writeQueue;
   }, [beginRelayRecovery, failSession, progressPatch, sendSessionControl, updateTransfer]);
@@ -481,7 +482,7 @@ export function useFileTransfer({
         session.pc?.close();
       }, 800);
     } catch (error) {
-      failSession(session, error instanceof Error ? error.message : "Could not finish the file");
+      failSession(session, describeFileSystemError(error, "Could not finish the file", "commit"));
     }
   }, [beginRelayRecovery, failSession, flushReceiveBuffer, sendSessionControl, updateTransfer]);
 
